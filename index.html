@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Soldier of Fortune - browser port</title>
+  <meta name="description" content="Play Soldier of Fortune (2000) in your browser with your own game files. Nothing is uploaded.">
+  <link rel="stylesheet" href="/src/app/style.css">
+</head>
+<body>
+  <main id="startup" aria-live="polite">
+    <header class="hero">
+      <h1>Soldier of Fortune</h1>
+      <p class="sub">Raven Software, 2000 · browser port using the openMERC engine (WebAssembly)</p>
+    </header>
+
+    <section data-state="welcome choose" class="card">
+      <h2>Your game files stay on this device</h2>
+      <p>This page plays the game from <strong>your own copy</strong> of Soldier of Fortune. Your files are read
+        locally by this browser tab; they are never uploaded. Only the engine itself is downloaded from this site.</p>
+      <p><strong>Tested edition:</strong> <span id="tested-edition"></span>. Other 1.07f installations may work but
+        are marked unverified.</p>
+      <ul id="capabilities" class="caps"></ul>
+    </section>
+
+    <section data-state="choose" class="card">
+      <h2>Choose your game folder</h2>
+      <p>Select the installation folder (for example <code>Soldier of Fortune</code>) or its <code>base</code> folder.
+        The files <code>pak0.pak</code>, <code>pak1.pak</code>, <code>pak2.pak</code>, <code>pak3.pak</code> and
+        <code>gs.pak</code> are needed (about 785&nbsp;MB).</p>
+      <div class="actions">
+        <button id="pick-handle" type="button" hidden>Choose folder (can be remembered)</button>
+        <label class="button" for="pick-folder">Choose folder</label>
+        <input id="pick-folder" type="file" webkitdirectory multiple hidden>
+        <label class="button secondary" for="pick-files">Choose the .pak files</label>
+        <input id="pick-files" type="file" multiple accept=".pak,.PAK" hidden>
+        <button id="continue-handle" type="button" hidden>Continue with remembered folder</button>
+      </div>
+      <div id="drop" class="drop" tabindex="0">…or drop the folder here</div>
+      <p class="note">Disc images (ISO/BIN/CUE), installers and archives are not read directly: install the game first.
+        A browser's file dialog may need a mouse, keyboard or touch; once files are chosen, everything else works with a
+        controller.</p>
+    </section>
+
+    <section data-state="validating preparing" class="card">
+      <h2 id="progress-title">Checking files…</h2>
+      <progress id="progress" max="1" value="0"></progress>
+      <p id="progress-label" class="note"></p>
+      <button id="cancel" type="button" class="secondary">Cancel</button>
+    </section>
+
+    <section data-state="ready" class="card">
+      <h2>Ready</h2>
+      <p id="ready-summary"></p>
+      <div id="unverified" class="warn" hidden></div>
+      <div class="actions">
+        <button id="play-fullscreen" type="button" class="primary">Play fullscreen</button>
+        <button id="play" type="button" class="primary">Play in this window</button>
+        <button id="reselect" type="button" class="secondary">Choose other files</button>
+      </div>
+      <p class="note">The game starts with its original start-up and main menu and fills this browser window at its
+        original 4:3 shape (black bars where the window is wider or taller). Load, save, settings and quitting are in
+        the game's own menu (Esc). <strong>Quit</strong> in the game's main menu stores your settings and saves and
+        returns to this page.</p>
+      <label class="check" id="remember-row"><input id="remember" type="checkbox"> Remember this folder on this device (only the folder
+        permission is stored, not a copy of the files)</label>
+    </section>
+
+    <section data-state="error" class="card error" role="alert">
+      <h2>These files can't be used</h2>
+      <ul id="error-list"></ul>
+      <button id="retry" type="button">Choose files again</button>
+    </section>
+
+    <section data-state="welcome choose ready" class="card">
+      <h2>Controls</h2>
+      <details open><summary>Keyboard and mouse (game defaults)</summary><dl id="help-kbm" class="help"></dl></details>
+      <details><summary>Controller</summary>
+        <p>Left stick moves, right stick looks. Start opens the game menu.</p><dl id="help-pad" class="help"></dl></details>
+      <details><summary>Touch</summary>
+        <p>Left side: drag to move (push fully to run). Right side: drag to look, tap to click menu items.
+          On-screen buttons cover firing, jumping, crouching, using, reloading, weapons, items, leaning, objectives
+          and the menu. Size, opacity and a left-handed layout can be changed below.</p></details>
+    </section>
+
+    <section data-state="welcome choose ready" class="card">
+      <h2>Browser settings</h2>
+      <p class="note">Tools of this web page, not of the game. The game's own saves are made and loaded in its
+        menus; this browser keeps them, together with its settings, until you delete them here. Export makes a
+        backup file that another browser can import.</p>
+      <p id="profile-summary" class="note">…</p>
+      <div class="actions">
+        <button id="export-saves" type="button" class="secondary">Export saves</button>
+        <label class="button secondary" for="import-saves">Import saves</label>
+        <input id="import-saves" type="file" accept="application/json,.json" hidden>
+        <button id="delete-saves" type="button" class="danger">Delete settings and saves</button>
+      </div>
+      <fieldset class="touch-settings"><legend>Touch controls</legend>
+        <label>Show <select id="touch-mode"><option value="auto">on touch screens, until a keyboard, mouse or controller is used</option><option value="on">always</option><option value="off">never</option></select></label>
+        <label>Size <input id="touch-scale" type="range" min="0.75" max="1.5" step="0.05"></label>
+        <label>Opacity <input id="touch-opacity" type="range" min="0.15" max="1" step="0.05"></label>
+        <label>Look speed <input id="touch-look" type="range" min="0.5" max="4" step="0.1"></label>
+        <label class="check"><input id="touch-left" type="checkbox"> Left-handed</label>
+        <label class="check"><input id="touch-invert" type="checkbox"> Invert look</label>
+      </fieldset>
+      <fieldset class="touch-settings"><legend>Advanced</legend>
+        <label class="check"><input id="dev-console" type="checkbox"> Enable the game's console key (~). Off in the
+          original game, as here by default.</label>
+      </fieldset>
+    </section>
+
+    <footer class="note">
+      Not affiliated with Raven Software or Activision. Engine: <a href="https://github.com/sidreshot/openMERC">openMERC</a>
+      (GPL-2.0-or-later) with browser patches; see <a href="engine/openMERC-LICENSE.txt">license</a> and
+      <a href="engine/openMERC-THIRD_PARTY.md">openMERC's third-party notices</a>; other components:
+      <a href="THIRD_PARTY_NOTICES.md">third-party notices</a>.
+    </footer>
+  </main>
+
+  <div id="game" hidden>
+    <canvas id="canvas" tabindex="-1"></canvas>
+    <div id="game-error" class="card error" role="alert" hidden></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

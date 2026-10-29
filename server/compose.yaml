@@ -1,0 +1,44 @@
+# Local multiplayer test setup (LAN only; see docs/MULTIPLAYER.md):
+#   server - openMERC dedicated server, 32-bit Linux (the game modules need the 32-bit layout), UDP 27910 inside the
+#            compose network only
+#   web    - LAN host: the page, the player's archives (read-only, byte ranges) and the WebSocket-to-UDP gateway that
+#            forwards browser clients to `server` and nothing else
+# The game installation is mounted read-only into both; no game file is copied into an image.
+#
+#   SOF_DATA=/path/to/Soldier\ of\ Fortune/base SOF_PUBLIC_IP=10.0.1.3 SOF_BIND=10.0.1.3 docker compose -f server/compose.yaml up --build
+name: sof-lan
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: server/docker/server.Dockerfile
+    platform: linux/386
+    image: sof-openmerc-server:local
+    tty: true # line-buffered console output for `docker compose logs server`
+    volumes:
+      - "${SOF_DATA:?set SOF_DATA to the game's base folder}:/data:ro"
+    environment:
+      # public 0: the server sends no heartbeats to master servers (sv_gamespy.c sends them only when public is 1)
+      SOF_SERVER_ARGS: >-
+        ${SOF_SERVER_ARGS:-+set dedicated 1 +set public 0 +set deathmatch 1 +set maxclients 8
+        +set hostname LAN-test +map dm/irqdm1}
+    restart: unless-stopped
+  web:
+    build:
+      context: ..
+      dockerfile: server/docker/web.Dockerfile
+    image: sof-lan-web:local
+    depends_on: [server]
+    volumes:
+      - "${SOF_DATA:?set SOF_DATA to the game's base folder}:/data:ro"
+      - "../dist:/app/dist:ro"
+      - "./certs:/app/server/certs:ro"
+    environment:
+      SOF_LAN_KEY: "${SOF_LAN_KEY:-}"
+      # the PC's LAN address: players connect to <it>:27910, links are printed for it
+      SOF_PUBLIC_IP: "${SOF_PUBLIC_IP:?set SOF_PUBLIC_IP to this PC's LAN address}"
+    command: ["--data", "/data", "--dist", "/app/dist", "--mp", "server:27910"]
+    ports:
+      # publish on the LAN address only (default: this PC only)
+      - "${SOF_BIND:-127.0.0.1}:${SOF_PORT:-8443}:8443"
+    restart: unless-stopped

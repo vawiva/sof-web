@@ -1,0 +1,28 @@
+{
+  "name": "sof-browser-port",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Soldier of Fortune (2000) in the browser: a startup page for the player's own game files plus the openMERC engine compiled to WebAssembly.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "engine": "bash scripts/build-engine.sh",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --strictPort --port 4173",
+    "check:dist": "node scripts/check-dist.mjs dist",
+    "lan": "node server/lan-host.mjs",
+    "lan:cert": "bash server/make-cert.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.5",
+    "vitest": "^3.2.7"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

@@ -1,0 +1,1205 @@
+diff --git a/engine/CMakeLists.txt b/engine/CMakeLists.txt
+index 333db77..de0a3a0 100644
+--- a/engine/CMakeLists.txt
++++ b/engine/CMakeLists.txt
+@@ -240,7 +240,14 @@ endif()
+ # Required libraries to build the different components of the binaries. Find
+ # them and add the include/linker directories and flags (in case the package
+ # manager find it in a weird place).
+-if (SDL3_SUPPORT)
++if (EMSCRIPTEN)
++	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++	# SDL3 comes from the Emscripten port
++	add_compile_options(--use-port=sdl3)
++	add_link_options(--use-port=sdl3)
++	add_definitions(-DUSE_SDL3)
++	add_library(SDL3::SDL3 INTERFACE IMPORTED)
++elseif (SDL3_SUPPORT)
+ 	find_package(SDL3 REQUIRED)
+ 	add_definitions(-DUSE_SDL3)
+ else()
+@@ -300,7 +307,7 @@ else()
+ 	endif()
+ endif()
+ 
+-if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD" AND NOT WIN32)
++if(NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD" AND NOT WIN32 AND NOT EMSCRIPTEN)
+ 	list(APPEND yquake2LinkerFlags "-Wl,--no-undefined")
+ endif()
+ 
+@@ -685,7 +692,13 @@ else()
+ 			${Platform-Specific-Source} ${Backends-Generic-Source})
+ 	target_link_libraries(openMerc ${yquake2LinkerFlags} ${yquake2ClientLinkerFlags}
+ 		${yquake2SDLLinkerFlags} ${yquake2ZLibLinkerFlags})
+-	if(NOT APPLE)
++	if(EMSCRIPTEN)
++		# Emscripten dynamic linking; modules are side modules loaded with dlopen
++		target_compile_definitions(openMerc PRIVATE OM_SOF_ELF_EXPORTS)
++		target_link_options(openMerc PRIVATE -sMAIN_MODULE=1 -sALLOW_MEMORY_GROWTH=1 -sMAX_WEBGL_VERSION=2
++			-sMIN_WEBGL_VERSION=2 -sFULL_ES3=1 -sSTACK_SIZE=4MB -lopenal -lidbfs.js -lworkerfs.js
++			-sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,IDBFS -sEXPORTED_FUNCTIONS=_main,_Cbuf_AddText,_CL_WriteConfiguration,_Browser_InputState,_Browser_StoreConfig -sINVOKE_RUN=0)
++	elseif(NOT APPLE)
+ 		# OpenMerc: the SoF engine functions OMsnd looks up by name (src/common/sof_exports.dynlist)
+ 		target_link_options(openMerc PRIVATE "-Wl,--dynamic-list=${CMAKE_CURRENT_SOURCE_DIR}/src/common/sof_exports.dynlist")
+ 		target_compile_definitions(openMerc PRIVATE OM_SOF_ELF_EXPORTS)
+diff --git a/engine/src/backends/generic/misc.c b/engine/src/backends/generic/misc.c
+index d9acea5..e78e933 100644
+--- a/engine/src/backends/generic/misc.c
++++ b/engine/src/backends/generic/misc.c
+@@ -29,7 +29,7 @@
+ 
+ #include "../../common/header/shared.h"
+ 
+-#if defined(__linux) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__sun) || defined(__APPLE__)
++#if defined(__linux) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__sun) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
+ #include <unistd.h> // readlink(), amongst others
+ #endif
+ 
+diff --git a/engine/src/backends/unix/main.c b/engine/src/backends/unix/main.c
+index 4de0655..3d48704 100644
+--- a/engine/src/backends/unix/main.c
++++ b/engine/src/backends/unix/main.c
+@@ -1,3 +1,8 @@
++#ifdef __EMSCRIPTEN__
++#define EM_NOT_BROWSER_ROOT_BYPASS 1 /* Emscripten reports uid 0; skip the root check */
++#else
++#define EM_NOT_BROWSER_ROOT_BYPASS 0
++#endif
+ /*
+  * Copyright (C) 1997-2001 Id Software, Inc.
+  *
+@@ -114,7 +119,7 @@ main(int argc, char **argv)
+ #ifndef __HAIKU__
+ 	/* Prevent running Quake II as root. Only very mad
+ 	   minded or stupid people even think about it. :) */
+-	if (getuid() == 0)
++	if (getuid() == 0 && 0 == EM_NOT_BROWSER_ROOT_BYPASS)
+ 	{
+ 		printf("Quake II shouldn't be run as root! Backing out to save your ass. If\n");
+ 		printf("you really know what you're doing, edit src/unix/main.c and remove\n");
+diff --git a/engine/src/backends/unix/network.c b/engine/src/backends/unix/network.c
+index 1b81300..8a9dc28 100644
+--- a/engine/src/backends/unix/network.c
++++ b/engine/src/backends/unix/network.c
+@@ -74,6 +74,46 @@ int ip6_sockets[2];
+ int ipx_sockets[2];
+ char *multicast_interface = NULL;
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++
++/*
++ * browser port: a browser cannot open UDP sockets. Datagrams of the client
++ * to other hosts are handed to the page (Module.netSend), which carries each
++ * one as a single WebSocket message to the gateway configured for the page;
++ * the gateway forwards it over UDP to an allowed game server and returns the
++ * server's datagrams the same way (Module.netRecv). Addresses keep their
++ * meaning: the engine still talks to <server ip>:<port>.
++ */
++EM_JS(void, browser_net_send, (const unsigned char *ip, int port, const unsigned char *data, int len), {
++	if (Module['netSend'])
++	{
++		Module['netSend'](HEAPU8.slice(ip, ip + 4), port, HEAPU8.slice(data, data + len));
++	}
++});
++
++/* one received datagram: its length, -1 when none is waiting, -2 when it does not fit */
++EM_JS(int, browser_net_recv, (unsigned char *ip, int *port, unsigned char *data, int max), {
++	if (!Module['netRecv'])
++	{
++		return -1;
++	}
++	var p = Module['netRecv']();
++	if (!p)
++	{
++		return -1;
++	}
++	if (p.data.length > max)
++	{
++		return -2;
++	}
++	HEAPU8.set(p.ip, ip);
++	HEAP32[port >> 2] = p.port;
++	HEAPU8.set(p.data, data);
++	return p.data.length;
++});
++#endif
++
+ static int NET_Socket(char *net_interface, int port, netsrc_t type, int family);
+ static const char *NET_ErrorString(void);
+ 
+@@ -533,6 +573,36 @@ NET_GetPacket(netsrc_t sock, netadr_t *net_from, sizebuf_t *net_message)
+ 		return true;
+ 	}
+ 
++#ifdef __EMSCRIPTEN__
++	(void)ret; (void)from; (void)fromlen; (void)net_socket; (void)protocol; (void)err;
++
++	/* browser port: only the client talks to other hosts (through the page's gateway) */
++	while (sock == NS_CLIENT)
++	{
++		int port = 0, n;
++
++		n = browser_net_recv(net_from->ip, &port, net_message->data, net_message->maxsize);
++
++		if (n == -2)
++		{
++			Com_Printf("Oversize packet from the network gateway\n");
++			continue;
++		}
++
++		if (n < 0)
++		{
++			break;
++		}
++
++		net_from->type = NA_IP;
++		net_from->port = htons((unsigned short)port);
++		net_message->cursize = n;
++		return true;
++	}
++
++	return false;
++#endif
++
+ 	for (protocol = 0; protocol < 3; protocol++)
+ 	{
+ 		if (protocol == 0)
+@@ -594,6 +664,21 @@ NET_SendPacket(netsrc_t sock, int length, void *data, netadr_t to)
+ 	int net_socket;
+ 	int addr_size = sizeof(struct sockaddr_in);
+ 
++#ifdef __EMSCRIPTEN__
++	if (to.type == NA_IP || to.type == NA_BROADCAST)
++	{
++		if (sock == NS_CLIENT)
++		{
++			static const byte everyone[4] = {255, 255, 255, 255};
++
++			browser_net_send(to.type == NA_BROADCAST ? everyone : to.ip, ntohs(to.port), data, length);
++		}
++
++		/* a game hosted inside the browser stays local (loopback); it cannot accept other players */
++		return;
++	}
++#endif
++
+ 	switch (to.type)
+ 	{
+ 		case NA_LOOPBACK:
+@@ -807,8 +892,12 @@ NET_Config(qboolean multiplayer)
+ 	}
+ 	else
+ 	{
++#ifdef __EMSCRIPTEN__
++		(void)NET_OpenIP; /* browser port: no sockets; datagrams go through the page's gateway */
++#else
+ 		/* open sockets */
+ 		NET_OpenIP();
++#endif
+ 	}
+ }
+ 
+diff --git a/engine/src/backends/unix/shared/hunk.c b/engine/src/backends/unix/shared/hunk.c
+index eebb49c..d08783e 100644
+--- a/engine/src/backends/unix/shared/hunk.c
++++ b/engine/src/backends/unix/shared/hunk.c
+@@ -50,6 +50,63 @@ byte *membase;
+ size_t maxhunksize;
+ size_t curhunksize;
+ 
++#ifdef __EMSCRIPTEN__
++/* Emscripten has no real mremap/munmap of anonymous mappings, so the hunk is a plain
++   heap block. Callers size their hunks close to actual use (models.c, gl3_model.c), so not
++   shrinking in Hunk_End costs little. */
++#include <stdlib.h>
++
++void *
++Hunk_Begin(int maxsize)
++{
++	maxhunksize = maxsize + sizeof(size_t) + 32;
++	curhunksize = 0;
++	membase = (byte *)calloc(1, maxhunksize);
++
++	if (membase == NULL)
++	{
++		Sys_Error("unable to allocate %d bytes", maxsize);
++	}
++
++	*((size_t *)membase) = curhunksize;
++	return membase + sizeof(size_t);
++}
++
++void *
++Hunk_Alloc(int size)
++{
++	byte *buf;
++
++	size = (size + 31) & ~31;
++
++	if (curhunksize + size > maxhunksize)
++	{
++		Sys_Error("%s: overflow %d > %d", __func__, curhunksize + size, maxhunksize);
++	}
++
++	buf = membase + sizeof(size_t) + curhunksize;
++	curhunksize += size;
++	return buf;
++}
++
++int
++Hunk_End(void)
++{
++	*((size_t *)membase) = curhunksize + sizeof(size_t);
++	return curhunksize;
++}
++
++void
++Hunk_Free(void *base)
++{
++	if (base)
++	{
++		free(((byte *)base) - sizeof(size_t));
++	}
++}
++
++#else /* !__EMSCRIPTEN__ */
++
+ void *
+ Hunk_Begin(int maxsize)
+ {
+@@ -172,3 +229,4 @@ Hunk_Free(void *base)
+ 	}
+ }
+ 
++#endif /* __EMSCRIPTEN__ */
+diff --git a/engine/src/backends/unix/system.c b/engine/src/backends/unix/system.c
+index 2290248..9ddbc7d 100644
+--- a/engine/src/backends/unix/system.c
++++ b/engine/src/backends/unix/system.c
+@@ -24,6 +24,9 @@
+  * =======================================================================
+  */
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include <dirent.h>
+ #include <dlfcn.h>
+ #include <fcntl.h>
+@@ -120,6 +123,19 @@ Sys_Quit(void)
+ 
+ 	printf("------------------------------------\n");
+ 
++#ifdef __EMSCRIPTEN__
++	/* browser port: the main loop keeps the runtime alive, so exit() only
++	   unwinds; stop the loop and tell the page (it stores the profile written
++	   above and returns to its start page) */
++	emscripten_cancel_main_loop();
++	EM_ASM({
++		if (Module['onQuit'])
++		{
++			Module['onQuit']();
++		}
++	});
++#endif
++
+ 	exit(0);
+ }
+ 
+diff --git a/engine/src/client/cl_main.c b/engine/src/client/cl_main.c
+index afd8c9c..6fa2b74 100644
+--- a/engine/src/client/cl_main.c
++++ b/engine/src/client/cl_main.c
+@@ -553,6 +553,19 @@ CL_InitLocal(void)
+ 	Cmd_AddCommand("weaplast", CL_WeapLast_f);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++/*
++ * browser port: lets the page see what the keyboard and mouse currently drive
++ * (bits 0-1: 0 game, 1 console, 2 message line, 3 menu; bit 2: a level is
++ * running), so its touch overlay can step aside for the menus
++ */
++int
++Browser_InputState(void)
++{
++	return (int)cls.key_dest | ((cls.state == ca_active) ? 4 : 0);
++}
++#endif
++
+ /*
+  * Writes key bindings and archived cvars to config.cfg
+  */
+@@ -568,6 +581,21 @@ CL_WriteConfiguration(void)
+ 	Com_WriteConfig(false);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++/* browser port: config.cfg for the page's periodic store, without printing
++   "Wrote configuration" over the game (the engine itself writes it only on
++   disconnect and quit, which a closing tab never reaches) */
++void
++Browser_StoreConfig(void)
++{
++	extern qboolean browser_quietconfig;
++
++	browser_quietconfig = true;
++	CL_WriteConfiguration();
++	browser_quietconfig = false;
++}
++#endif
++
+ typedef struct
+ {
+ 	char *name;
+diff --git a/engine/src/client/cl_network.c b/engine/src/client/cl_network.c
+index 4c0c845..ba5b5d5 100644
+--- a/engine/src/client/cl_network.c
++++ b/engine/src/client/cl_network.c
+@@ -619,12 +619,14 @@ CL_PingServers_f(void)
+ 	{
+ 		adr.type = NA_BROADCAST;
+ 		adr.port = BigShort(PORT_SERVER);
+-		Netchan_OutOfBandPrint(NS_CLIENT, adr, va("info %i", PROTOCOL_VERSION));
++		/* browser port fix: servers answer "info 33" only (SVC_Info; the menu's
++		   serverstatus sends 33 too), PROTOCOL_VERSION is 34 */
++		Netchan_OutOfBandPrint(NS_CLIENT, adr, "info %i", 33);
+ 
+ 		Com_Printf("pinging multicast...\n");
+ 		adr.type = NA_MULTICAST6;
+ 		adr.port = BigShort(PORT_SERVER);
+-		Netchan_OutOfBandPrint(NS_CLIENT, adr, va("info %i", PROTOCOL_VERSION));
++		Netchan_OutOfBandPrint(NS_CLIENT, adr, "info %i", 33);
+ 	}
+ 
+ 	noipx = Cvar_Get("noipx", "0", CVAR_NOSET);
+@@ -633,7 +635,7 @@ CL_PingServers_f(void)
+ 	{
+ 		adr.type = NA_BROADCAST_IPX;
+ 		adr.port = BigShort(PORT_SERVER);
+-		Netchan_OutOfBandPrint(NS_CLIENT, adr, va("info %i", PROTOCOL_VERSION));
++		Netchan_OutOfBandPrint(NS_CLIENT, adr, "info %i", 33);
+ 	}
+ 
+ 	/* send a packet to each address book entry */
+@@ -660,7 +662,7 @@ CL_PingServers_f(void)
+ 			adr.port = BigShort(PORT_SERVER);
+ 		}
+ 
+-		Netchan_OutOfBandPrint(NS_CLIENT, adr, va("info %i", PROTOCOL_VERSION));
++		Netchan_OutOfBandPrint(NS_CLIENT, adr, "info %i", 33); /* see the broadcast above */
+ 	}
+ 
+ 	/* OpenMerc (I6m): then the internet list (SPEC-200 pingservers, SPEC-204 section 1) */
+diff --git a/engine/src/client/cl_player.c b/engine/src/client/cl_player.c
+index 0c9d1c8..a00c923 100644
+--- a/engine/src/client/cl_player.c
++++ b/engine/src/client/cl_player.c
+@@ -249,9 +249,9 @@ CLP_SZWrite(sof_sizebuf_t *sb, const void *data, int length)
+ /* ---- common import table ------------------------------------------------------------------------- */
+ 
+ static void *
+-CLP_CvarGet(const char *name, const char *value, int flags)
++CLP_CvarGet(const char *name, const char *value, int flags, void (*changed)(void *cvar))
+ {
+-	return Cvar_GetModule(name, value, flags, NULL);
++	return Cvar_GetModule(name, value, flags, (cvarcallback_t)changed);
+ }
+ 
+ static void *
+diff --git a/engine/src/client/cl_screen.c b/engine/src/client/cl_screen.c
+index 0be16eb..cd7d689 100644
+--- a/engine/src/client/cl_screen.c
++++ b/engine/src/client/cl_screen.c
+@@ -82,7 +82,7 @@ extern cvar_t *crosshair_color_r;
+ extern cvar_t *crosshair_color_g;
+ extern cvar_t *crosshair_color_b;
+ extern cvar_t *cl_showspeed;
+-extern float GetPlayerSpeed(float *, float *);
++extern void GetPlayerSpeed(float *, float *);
+ 
+ static void SCR_TimeRefresh_f(void);
+ static void SCR_Loading_f(void);
+@@ -1639,6 +1639,29 @@ SCR_SoF_Frame(void)
+ 
+ 	R_BeginFrame(0);
+ 
++#ifdef __EMSCRIPTEN__
++	/* browser port: the savegame thumbnail of a menu opened in the game is
++	   taken from one more frame of the game; the renderer composes the frame
++	   into the default framebuffer at its end, and WebGL presents it only
++	   when this frame's callback returns, so it is read after R_EndFrame */
++	if (M_ThumbnailPending())
++	{
++		if (cls.state == ca_active && cl.refresh_prepped)
++		{
++			SCR_CalcVrect();
++			SCR_TileClear();
++			V_RenderView(0);
++			HUD_Set2D();
++			SCR_SoF_DrawOverlays();
++		}
++
++		SCR_SoF_EndFrame();
++		R_EndFrame();
++		M_TakePendingThumbnail();
++		return;
++	}
++#endif
++
+ 	if (live)
+ 	{
+ 		SCR_CalcVrect();
+diff --git a/engine/src/client/header/client.h b/engine/src/client/header/client.h
+index 6e2315d..b213939 100644
+--- a/engine/src/client/header/client.h
++++ b/engine/src/client/header/client.h
+@@ -542,6 +542,11 @@ void M_Menu_Main_f (void);
+ void M_ForceMenuOff (void);
+ void M_AddToServerList (netadr_t adr, char *info);
+ void M_MouseMove (int dx, int dy); /* OpenMerc (I6m): menu pointer movement, raw pixels (SPEC-801 7.2) */
++#ifdef __EMSCRIPTEN__
++void M_MouseSetPos(float x, float y); /* browser port: absolute menu pointer, window pixels */
++qboolean M_ThumbnailPending(void); /* browser port: savegame thumbnail of the frame under the menus */
++void M_TakePendingThumbnail(void);
++#endif
+ 
+ void CL_ParseInventory (void);
+ void CL_DrawInventory (void);
+diff --git a/engine/src/client/input/sdl3.c b/engine/src/client/input/sdl3.c
+index 6f3a69d..152d307 100644
+--- a/engine/src/client/input/sdl3.c
++++ b/engine/src/client/input/sdl3.c
+@@ -742,6 +742,15 @@ IN_Update(void)
+ 				}
+ 				else if (cls.key_dest == key_menu)
+ 				{
++#ifdef __EMSCRIPTEN__
++					/* browser port: the menus never hold pointer lock (see the grab
++					   below), so the menu pointer sits where the browser's pointer is */
++					if (!SDL_GetWindowRelativeMouseMode(SDL_GetWindowFromID(event.motion.windowID)))
++					{
++						M_MouseSetPos(event.motion.x, event.motion.y);
++						break;
++					}
++#endif
+ 					/* OpenMerc (I6m): the menu pointer moves by the raw movement (SPEC-801 7.2) */
+ 					M_MouseMove((int)event.motion.xrel, (int)event.motion.yrel);
+ 				}
+@@ -1030,6 +1039,16 @@ IN_Update(void)
+ 			(in_grab->value == 2 && windowed_mouse->value));
+ 	}
+ 
++#ifdef __EMSCRIPTEN__
++	/* browser port: pointer lock needs a click and freezes the pointer
++	   position, so it is held during play only; menus and the console use the
++	   absolute pointer */
++	if (cls.key_dest != key_game)
++	{
++		want_grab = false;
++	}
++#endif
++
+ 	// calling GLimp_GrabInput() each frame is a bit ugly but simple and should work.
+ 	// The called SDL functions return after a cheap check, if there's nothing to do.
+ 	GLimp_GrabInput(want_grab);
+diff --git a/engine/src/client/menu/menu.c b/engine/src/client/menu/menu.c
+index 0a29fc9..7c93daf 100644
+--- a/engine/src/client/menu/menu.c
++++ b/engine/src/client/menu/menu.c
+@@ -675,6 +675,23 @@ M_RebuildScreens(void)
+ /* single-player savegame thumbnail taken when the menus open (SPEC-801 1) */
+ static byte m_thumb[128 * 128 * 4];
+ static qboolean m_hasthumb;
++#ifdef __EMSCRIPTEN__
++static qboolean m_thumbpending;
++
++qboolean
++M_ThumbnailPending(void)
++{
++	return m_thumbpending;
++}
++
++/* called by the screen code with the game view drawn and not yet presented */
++void
++M_TakePendingThumbnail(void)
++{
++	m_thumbpending = false;
++	m_hasthumb = MR_Thumbnail(m_thumb);
++}
++#endif
+ 
+ /* for the savegame writer (sg_host_t.Screenshot, SPEC-303 SHOT chunk) */
+ qboolean
+@@ -708,7 +725,15 @@ M_CreateSystem(void)
+ 	{
+ 		if (ingame)
+ 		{
++#ifdef __EMSCRIPTEN__
++			/* browser port: WebGL has already presented and cleared the last
++			   frame; the next frame renders the game once more and takes it
++			   (SCR_SoF_Frame, M_TakePendingThumbnail) */
++			m_hasthumb = false;
++			m_thumbpending = true;
++#else
+ 			m_hasthumb = MR_Thumbnail(m_thumb);
++#endif
+ 		}
+ 		else if (!m_hasthumb)
+ 		{
+@@ -790,7 +815,11 @@ M_OpenMenu(const char *rawname, const char *rawframe, qboolean forced)
+ 	   screens amain/a_main/a_amain) is gone; every way into it - the
+ 	   intro's "menu amain", the stock home buttons - opens the rail main
+ 	   menu (menus/main.rmf) */
+-	if (!strcmp(name, "amain") || !strcmp(name, "a_main") || !strcmp(name, "a_amain"))
++	/* browser port: only where openMERC's own menu pages are installed (its
++	   landing page comes from zz_openmerc.pak); with the game's own pages the
++	   original animated main menu stays */
++	if ((!strcmp(name, "amain") || !strcmp(name, "a_main") || !strcmp(name, "a_amain")) &&
++		(FS_LoadFile("menus/m_omhome.rmf", NULL) > 0))
+ 	{
+ 		Q_strlcpy(name, "main", sizeof(name));
+ 	}
+@@ -1252,6 +1281,21 @@ M_MouseMove(int dx, int dy)
+ 	ms.my += dy / MR_Scale();
+ }
+ 
++#ifdef __EMSCRIPTEN__
++/* browser port: the pointer placed at a window position (pixels) */
++void
++M_MouseSetPos(float x, float y)
++{
++	if (!ms.active)
++	{
++		return;
++	}
++
++	ms.mx = x / MR_Scale();
++	ms.my = y / MR_Scale();
++}
++#endif
++
+ static void
+ M_ClampPointer(void)
+ {
+@@ -1430,7 +1474,25 @@ M_InView(mwidget_t *w)
+ 	return y + ML_TotalH(w) > top && y < bottom;
+ }
+ 
++static /* browser port: the top-left corner of a widget's box for the keyboard and
++   gamepad pointer. A bolted widget's offset is its alignment to the bolt (a
++   centred one sits -w/2, -h/2 from it), part of where it is drawn and hit, so
++   only the padding is taken off; subtracting the offset too put the pointer on
++   the lower right edge of the main menu's buttons, outside them */
+ static void
++M_PadBoxOrigin(const mwidget_t *w, int *x, int *y)
++{
++	*x -= w->bpad;
++	*y -= w->bpad;
++
++	if (!(w->flags & WF_BOLTED))
++	{
++		*x -= w->xoff;
++		*y -= w->yoff;
++	}
++}
++
++void
+ M_TabNext(qboolean back)
+ {
+ 	mscreen_t *scr = M_TopScreen();
+@@ -1487,8 +1549,7 @@ M_TabNext(qboolean back)
+ 			int x, y;
+ 
+ 			ML_WidgetScreenPos(w->page, w, &x, &y);
+-			x -= w->bpad + w->xoff;
+-			y -= w->bpad + w->yoff;
++			M_PadBoxOrigin(w, &x, &y);
+ 			ms.mx = (float)(x + ML_TotalW(w) / 2);
+ 			ms.my = (float)(y + ML_TotalH(w) / 2);
+ 			ML_PageToScreen(w->page, w, &ms.mx, &ms.my);
+@@ -1586,8 +1647,7 @@ M_PadNext(qboolean back, qboolean bolted)
+ 		}
+ 
+ 		ML_WidgetScreenPos(pg, w, &x, &y);
+-		x -= w->bpad + w->xoff;
+-		y -= w->bpad + w->yoff;
++		M_PadBoxOrigin(w, &x, &y);
+ 		ms.mx = (float)(x + ML_TotalW(w) / 2);
+ 		ms.my = (float)(y + h / 2);
+ 		ML_PageToScreen(pg, w, &ms.mx, &ms.my);
+diff --git a/engine/src/client/refresh/gl3/gl3_draw.c b/engine/src/client/refresh/gl3/gl3_draw.c
+index d4b0d20..0636297 100644
+--- a/engine/src/client/refresh/gl3/gl3_draw.c
++++ b/engine/src/client/refresh/gl3/gl3_draw.c
+@@ -671,7 +671,11 @@ void GL3_EndFrame(void)
+ 	GL3_SoF_ScreenShotFrame();
+ 	GL3_Post_GpuTimer(false);
+ 
+-#ifdef YQ2_GL3_GLES
++	/* Not on Emscripten: the browser composites the default framebuffer after this frame returns,
++	   so invalidating it here would discard the finished image; the FBO attachment names are also
++	   invalid for the default framebuffer (INVALID_ENUM every frame, which later glGetError() checks
++	   then misattribute to texture uploads). */
++#if defined(YQ2_GL3_GLES) && !defined(__EMSCRIPTEN__)
+ 	static const GLenum attachments[] = {GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT};
+ 	glInvalidateFramebuffer(GL_FRAMEBUFFER, 3, attachments);
+ #endif
+diff --git a/engine/src/client/refresh/gl3/gl3_image.c b/engine/src/client/refresh/gl3/gl3_image.c
+index 70ebd61..2378a12 100644
+--- a/engine/src/client/refresh/gl3/gl3_image.c
++++ b/engine/src/client/refresh/gl3/gl3_image.c
+@@ -802,6 +802,39 @@ InternalFormat(qboolean has_alpha)
+ 	return has_alpha ? GL_RGBA8 : GL_RGB8;
+ }
+ 
++/*
++ * Uploads RGBA8 pixel data. Desktop GL converts RGBA source data into GL_RGB8 storage itself;
++ * GLES3/WebGL2 only accept GL_RGB8 from GL_RGB data (GL_INVALID_OPERATION otherwise, leaving
++ * the texture empty), so opaque images are repacked to RGB first.
++ */
++static void
++TexImageRGBA(GLint level, GLint ifmt, GLsizei w, GLsizei h, const byte *rgba)
++{
++#ifdef YQ2_GL3_GLES
++	if ((ifmt == GL_RGB8) || (ifmt == GL_RGB))
++	{
++		size_t i, n = (size_t)w * h;
++		byte *rgb = malloc(n * 3);
++
++		if (rgb)
++		{
++			for (i = 0; i < n; i++)
++			{
++				rgb[i * 3 + 0] = rgba[i * 4 + 0];
++				rgb[i * 3 + 1] = rgba[i * 4 + 1];
++				rgb[i * 3 + 2] = rgba[i * 4 + 2];
++			}
++
++			glTexImage2D(GL_TEXTURE_2D, level, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
++			free(rgb);
++			return;
++		}
++	}
++#endif
++
++	glTexImage2D(GL_TEXTURE_2D, level, ifmt, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++}
++
+ static int
+ M32Int(const byte *m, int ofs)
+ {
+@@ -921,7 +954,6 @@ UploadM32(gl3image_t *image, byte *m, int size, int kind, int pictipskip)
+ {
+ 	int numlevels, start, level, maxsize = 0;
+ 	GLint ifmt = InternalFormat(image->has_alpha);
+-	GLenum srcfmt = GL_RGBA;
+ 
+ 	for (numlevels = 0; numlevels < M32_MIP_LEVELS; numlevels++)
+ 	{
+@@ -974,7 +1006,7 @@ UploadM32(gl3image_t *image, byte *m, int size, int kind, int pictipskip)
+ 		int h = M32Int(m, M32_OFS_HEIGHTS + 4 * level);
+ 		int ofs = M32Int(m, M32_OFS_OFFSETS + 4 * level);
+ 
+-		glTexImage2D(GL_TEXTURE_2D, level - start, ifmt, w, h, 0, srcfmt, GL_UNSIGNED_BYTE, m + ofs);
++		TexImageRGBA(level - start, ifmt, w, h, m + ofs);
+ 
+ 		if (glGetError() != GL_NO_ERROR)
+ 		{
+@@ -992,7 +1024,7 @@ UploadM32(gl3image_t *image, byte *m, int size, int kind, int pictipskip)
+ 				ifmt = GL_RGB8;
+ 			}
+ 
+-			glTexImage2D(GL_TEXTURE_2D, level - start, ifmt, w, h, 0, srcfmt, GL_UNSIGNED_BYTE, m + ofs);
++			TexImageRGBA(level - start, ifmt, w, h, m + ofs);
+ 		}
+ 
+ 		if (kind & 0x1)
+@@ -1461,7 +1493,7 @@ GL3_SoF_SetRawImage(const char *name, int w, int h, const byte *rgba)
+ 	GL3_SelectTMU(GL_TEXTURE0);
+ 	GL3_Bind(image->texnum);
+ 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++	TexImageRGBA(0, GL_RGB8, w, h, rgba);
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+ 	SetImageFilter(image);
+ }
+diff --git a/engine/src/client/refresh/gl3/gl3_main.c b/engine/src/client/refresh/gl3/gl3_main.c
+index 8df4081..c21eb2f 100644
+--- a/engine/src/client/refresh/gl3/gl3_main.c
++++ b/engine/src/client/refresh/gl3/gl3_main.c
+@@ -329,7 +329,9 @@ GL3_Register(void)
+ 
+ 	/* SoF names (SPEC-413) */
+ 	gl_drawbuffer = ri.Cvar_Get("gl_drawbuffer", "GL_BACK", 0);
+-#ifdef OM_SOFREF
++#if defined(OM_SOFREF) || defined(__EMSCRIPTEN__)
++	/* browser port: like the SoF renderer, the mode is the game's gl_mode, so
++	   the stock video page and default_video.cfg select it */
+ 	r_vsync = gl_swapinterval;
+ 	r_mode = gl_mode;
+ #else
+diff --git a/engine/src/client/refresh/gl3/gl3_misc.c b/engine/src/client/refresh/gl3/gl3_misc.c
+index 3c46801..cca1c2f 100644
+--- a/engine/src/client/refresh/gl3/gl3_misc.c
++++ b/engine/src/client/refresh/gl3/gl3_misc.c
+@@ -55,11 +55,15 @@ GL3_SetDefaultState(void)
+ 	//R_TextureAlphaMode(gl1_texturealphamode->string);
+ 	//R_TextureSolidMode(gl1_texturesolidmode->string);
+ 
++	/* WebGL has no default texture object 0: these would only raise INVALID_OPERATION.
++	   Every real texture sets its own filter/wrap state when it is created. */
++#ifndef __EMSCRIPTEN__
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_filter_min);
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter_max);
+ 
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+ 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
++#endif
+ 
+ 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+ 
+diff --git a/engine/src/client/refresh/gl3/gl3_post.c b/engine/src/client/refresh/gl3/gl3_post.c
+index 52fdee2..79d29ba 100644
+--- a/engine/src/client/refresh/gl3/gl3_post.c
++++ b/engine/src/client/refresh/gl3/gl3_post.c
+@@ -1221,6 +1221,14 @@ static struct
+ 	float vr[VOLFOG_MAXREGIONS * 32];
+ } V;
+ 
++/* GLSL ES needs explicit locations when a shader has more than one output; desktop GL binds them
++   with glBindFragDataLocation before linking (GL3_Post_BindOutputs) */
++#ifdef YQ2_GL3_GLES3
++#define VOLFOG_OUTPUTS "layout(location = 0) out vec4 outColor;\nlayout(location = 1) out vec4 outEmissive;\n"
++#else
++#define VOLFOG_OUTPUTS "out vec4 outColor;\nout vec4 outEmissive;\n"
++#endif
++
+ static const char *volfog_fs =
+ 	"uniform sampler2D depthtex;\n"
+ 	"uniform mat4 invpv;\n"
+@@ -1230,8 +1238,7 @@ static const char *volfog_fs =
+ 	"uniform vec4 vr[128];\n"
+ 	"in vec2 uv;\n"
+ 	"in vec2 vuv;\n"
+-	"out vec4 outColor;\n"
+-	"out vec4 outEmissive;\n"
++	VOLFOG_OUTPUTS
+ 	"float h3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }\n"
+ 	"float vnoise(vec3 x)\n"
+ 	"{\n"
+diff --git a/engine/src/client/refresh/gl3/gl3_sof2d.c b/engine/src/client/refresh/gl3/gl3_sof2d.c
+index abbb520..fea60e2 100644
+--- a/engine/src/client/refresh/gl3/gl3_sof2d.c
++++ b/engine/src/client/refresh/gl3/gl3_sof2d.c
+@@ -1514,7 +1514,39 @@ ReadWindowRGB(int *w, int *h)
+ 	GL3_FX_Flush();
+ 	GL3_DrawCurrent2Dbatch();
+ 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
++#ifdef __EMSCRIPTEN__
++	{
++		/* GLES 3 / WebGL 2 guarantee only RGBA + UNSIGNED_BYTE for reading the
++		   framebuffer; read that and pack it to RGB in place */
++		byte *rgba = malloc((size_t)(*w) * (*h) * 4);
++		size_t i, n = (size_t)(*w) * (*h);
++		GLint readfb = 0;
++
++		if (!rgba)
++		{
++			free(buf);
++			return NULL;
++		}
++
++		/* the window's picture (the post-processing passes draw into their
++		   own framebuffers and compose into this one) */
++		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readfb);
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++		glReadPixels(0, 0, *w, *h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, readfb);
++
++		for (i = 0; i < n; i++)
++		{
++			buf[i * 3] = rgba[i * 4];
++			buf[i * 3 + 1] = rgba[i * 4 + 1];
++			buf[i * 3 + 2] = rgba[i * 4 + 2];
++		}
++
++		free(rgba);
++	}
++#else
+ 	glReadPixels(0, 0, *w, *h, GL_RGB, GL_UNSIGNED_BYTE, buf);
++#endif
+ 	return buf;
+ }
+ 
+diff --git a/engine/src/client/vid/glimp_sdl3.c b/engine/src/client/vid/glimp_sdl3.c
+index 25360e3..b0216b4 100644
+--- a/engine/src/client/vid/glimp_sdl3.c
++++ b/engine/src/client/vid/glimp_sdl3.c
+@@ -149,6 +149,12 @@ CreateSDLWindow(SDL_WindowFlags flags, int fullscreen, int w, int h)
+ 
+ 	if (window)
+ 	{
++#ifdef __EMSCRIPTEN__
++		/* browser port: the page sizes and letterboxes the canvas with CSS,
++		   which SDL takes as the window size; render at the requested mode
++		   and let the browser scale that picture into the CSS box */
++		SDL_SetWindowSize(window, w, h);
++#endif
+ 		/* enable text input */
+ 		SDL_StartTextInput(window);
+ 
+@@ -876,6 +882,13 @@ GLimp_GetRefreshRate(void)
+ 		{
+ 			glimp_refreshRate = mode->refresh_rate;
+ 		}
++
++		/* SDL3 on Emscripten reports 0 Hz. The SDL2 path already falls back to 60;
++		   without it the frame pacer targets 0 fps and never runs a frame. */
++		if (glimp_refreshRate <= 0)
++		{
++			glimp_refreshRate = 60;
++		}
+ 	}
+ 
+ 	return glimp_refreshRate;
+diff --git a/engine/src/client/vid/vid.c b/engine/src/client/vid/vid.c
+index 9ce2ab3..e997d8f 100644
+--- a/engine/src/client/vid/vid.c
++++ b/engine/src/client/vid/vid.c
+@@ -321,6 +321,23 @@ VID_Apply_f(void)
+ static qboolean
+ VID_GetModeInfo(int *width, int *height, int mode)
+ {
++#ifdef __EMSCRIPTEN__
++	/* browser port: gl_mode (= r_mode here) keeps Soldier of Fortune's
++	   (Quake II's) numbering, which the stock video page and
++	   default_video.cfg use: 3 = 640x480 ... 9 = 1600x1200, all 4:3 */
++	static const int sof_modes[][2] = {
++		{320, 240}, {400, 300}, {512, 384}, {640, 480}, {800, 600}, {960, 720},
++		{1024, 768}, {1152, 864}, {1280, 960}, {1600, 1200}, {2048, 1536}
++	};
++
++	if ((mode >= 0) && (mode < (int)(sizeof(sof_modes) / sizeof(sof_modes[0]))))
++	{
++		*width = sof_modes[mode][0];
++		*height = sof_modes[mode][1];
++		return true;
++	}
++#endif
++
+ 	if ((mode < 0) || (mode >= VID_NUM_MODES))
+ 	{
+ 		return false;
+diff --git a/engine/src/common/frame.c b/engine/src/common/frame.c
+index a60a3b5..a2b389a 100644
+--- a/engine/src/common/frame.c
++++ b/engine/src/common/frame.c
+@@ -179,6 +179,28 @@ Qcommon_Buildstring(void)
+ 	printf("Architecture: %s\n", YQ2ARCH);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++/* The browser owns the loop: one engine frame per animation frame. Qcommon_Frame keeps
++   its own usec-based timing and frame pacing, so the simulation is not tied to 60 Hz. */
++static long long em_oldtime;
++
++static void
++Qcommon_EmFrame(void)
++{
++	long long newtime = Sys_Microseconds();
++	curtime = (int)(newtime / 1000ll);
++	Qcommon_Frame(newtime - em_oldtime);
++	em_oldtime = newtime;
++}
++
++static void
++Qcommon_Mainloop(void)
++{
++	em_oldtime = Sys_Microseconds();
++	emscripten_set_main_loop(Qcommon_EmFrame, 0, 1);
++}
++#else
+ static void
+ Qcommon_Mainloop(void)
+ {
+@@ -229,6 +251,7 @@ Qcommon_Mainloop(void)
+ 		oldtime = newtime;
+ 	}
+ }
++#endif /* __EMSCRIPTEN__ */
+ 
+ /* SoF: default.cfg, then config.cfg (SPEC-301 Behaviour 2) */
+ void Qcommon_ExecConfigs(qboolean gameStartUp)
+diff --git a/engine/src/common/gamespy.c b/engine/src/common/gamespy.c
+index e562bc8..301cb5e 100644
+--- a/engine/src/common/gamespy.c
++++ b/engine/src/common/gamespy.c
+@@ -307,6 +307,15 @@ GS_WouldBlock(void)
+ static gssock_t
+ GS_NewSocket(int type, int protocol)
+ {
++#ifdef __EMSCRIPTEN__
++	/* browser port: a page cannot open these sockets (Emscripten would turn them
++	   into WebSocket connections to the internet master servers); the browser
++	   build has no internet server list - LAN servers come through the page's
++	   gateway (backends/unix/network.c) */
++	(void)type;
++	(void)protocol;
++	return GS_NOSOCK;
++#endif
+ #ifdef _WIN32
+ 	SOCKET s = socket(AF_INET, type, protocol);
+ 
+diff --git a/engine/src/common/header/sof/game_api.h b/engine/src/common/header/sof/game_api.h
+index fc54636..eaaee32 100644
+--- a/engine/src/common/header/sof/game_api.h
++++ b/engine/src/common/header/sof/game_api.h
+@@ -574,7 +574,8 @@ typedef sof_player_export_t *(*sof_getplayerapi_t)(void *common, void *side);
+    76 bytes; the client fills every entry (the game fills its own copy for the server side). */
+ typedef struct sof_player_common_import_s
+ {
+-	void *(*Cvar_Get)(const char *name, const char *value, int flags);       /* 0x00 */
++	void *(*Cvar_Get)(const char *name, const char *value, int flags,
++			void (*changed)(void *cvar));                                    /* 0x00, 4 args like game import 87 */
+ 	void *(*Cvar_Set)(const char *name, const char *value);                  /* 0x04 */
+ 	void (*Cvar_SetValue)(const char *name, float value);                    /* 0x08 */
+ 	int (*Cmd_Argc)(void);                                                   /* 0x0C */
+diff --git a/engine/src/common/sof_engine.c b/engine/src/common/sof_engine.c
+index 7301b86..7a06cfd 100644
+--- a/engine/src/common/sof_engine.c
++++ b/engine/src/common/sof_engine.c
+@@ -527,6 +527,10 @@ Com_ExecAutoexec(void)
+  * config.cfg (SPEC-301 Behaviour 11)
+  * --------------------------------------------------------------------- */
+ 
++#ifdef __EMSCRIPTEN__
++qboolean browser_quietconfig; /* browser port: write config.cfg without the console message */
++#endif
++
+ #ifndef DEDICATED_ONLY
+ void
+ Com_WriteConfig(qboolean keysonly)
+@@ -587,6 +591,13 @@ Com_WriteConfig(qboolean keysonly)
+ 
+ 	fclose(f);
+ 
++#ifdef __EMSCRIPTEN__
++	if (browser_quietconfig)
++	{
++		return; /* the page's background store (Browser_StoreConfig) */
++	}
++#endif
++
+ 	if (keysonly)
+ 	{
+ 		Com_Printf("Wrote key bindings to %s.\n", path);
+diff --git a/engine/src/common/sof_exports.c b/engine/src/common/sof_exports.c
+index f6a3cc7..d26f6e4 100644
+--- a/engine/src/common/sof_exports.c
++++ b/engine/src/common/sof_exports.c
+@@ -21,9 +21,10 @@
+ 
+ /* Cvar_Get(name, default, flags): module-facing, hidden cvars invisible */
+ OM_SOF_VISIBLE cvar_t *
+-SoFExp_Cvar_Get(const char *name, const char *value, int flags)
++SoFExp_Cvar_Get(const char *name, const char *value, int flags, void (*changed)(cvar_t *))
+ {
+-	return Cvar_GetModule(name, value, flags, NULL);
++	/* OMsnd passes a 4th (callback) argument; wasm call_indirect needs the exact signature */
++	return Cvar_GetModule(name, value, flags, changed);
+ }
+ 
+ /* FS_LoadFile(name, buffer, unused): the third argument is ignored */
+diff --git a/game/src/damage/damage_api.h b/game/src/damage/damage_api.h
+index 2a98747..ee30fd5 100644
+--- a/game/src/damage/damage_api.h
++++ b/game/src/damage/damage_api.h
+@@ -140,7 +140,7 @@ extern G3ShotHits dmg_shot;
+ void Dmg_ShotClear(void);
+ // Set the ray for the filter (world space); then call gix.tracefilter(..., Dmg_ShotFilter).
+ void Dmg_ShotBegin(const vec3_t start, const vec3_t end);
+-int Dmg_ShotFilter(trace_t *tr);                  // SPEC-001 #53 filter: passes between limbs, snaps to the first record
++int Dmg_ShotFilter(trace_t *tr, const float *start = nullptr, const float *sweepend = nullptr);                  // SPEC-001 #53 filter: passes between limbs, snaps to the first record
+ // Convenience: Dmg_ShotBegin + engine trace with the filter.
+ trace_t Dmg_ShotTrace(const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, edict_t *pass,
+                       int mask);
+diff --git a/game/src/damage/g3_shot.cpp b/game/src/damage/g3_shot.cpp
+index 8022d59..6f27174 100644
+--- a/game/src/damage/g3_shot.cpp
++++ b/game/src/damage/g3_shot.cpp
+@@ -57,7 +57,7 @@ static int SurfMaterial(const trace_t *tr)
+ 	return ((*(const int *)((const char *)tr->surface + 32)) >> 24) & 0xff;
+ }
+ 
+-int Dmg_ShotFilter(trace_t *tr)
++int Dmg_ShotFilter(trace_t *tr, const float *, const float *)
+ {
+ 	edict_t *ent = tr->ent;
+ 	if (!ent || ent == world)
+diff --git a/game/src/g_weapon.cpp b/game/src/g_weapon.cpp
+index 90c9390..cd135f2 100644
+--- a/game/src/g_weapon.cpp
++++ b/game/src/g_weapon.cpp
+@@ -349,7 +349,7 @@ static void GlassHit(edict_t *ent, edict_t *other, csurface_t *surf)
+ static edict_t *g_shotowner;
+ static vec3_t g_shotstart, g_shotdir;
+ 
+-static int ShotFilter(trace_t *tr)
++static int ShotFilter(trace_t *tr, const float *, const float *)
+ {
+ 	edict_t *e = tr->ent;
+ 	if (!e || e == world)
+diff --git a/game/src/player_api.h b/game/src/player_api.h
+index c2179c0..4d96542 100644
+--- a/game/src/player_api.h
++++ b/game/src/player_api.h
+@@ -216,16 +216,18 @@ protected:
+ // Weapon description: 32 virtual slots; the game calls 28 (0x70) and 29 (0x74)
+ class WeaponDesc {
+ public:
+-	virtual void v00() = 0; virtual void v01() = 0; virtual void v02() = 0; virtual void v03() = 0;
+-	virtual void v04() = 0; virtual void v05() = 0; virtual void v06() = 0; virtual void v07() = 0;
+-	virtual void v08() = 0; virtual void v09() = 0; virtual void v10() = 0; virtual void v11() = 0;
+-	virtual void v12() = 0; virtual void v13() = 0; virtual void v14() = 0; virtual void v15() = 0;
+-	virtual void v16() = 0; virtual void v17() = 0; virtual void v18() = 0; virtual void v19() = 0;
+-	virtual void v20() = 0; virtual void v21() = 0; virtual void v22() = 0; virtual void v23() = 0;
+-	virtual void v24() = 0; virtual void v25() = 0; virtual void v26() = 0; virtual void v27() = 0;
++	// slots return int like the player module's WeaponDesc (player/src/pm_local.h): under wasm a
++	// virtual call's signature must match the implementation exactly
++	virtual int v00() = 0; virtual int v01() = 0; virtual int v02() = 0; virtual int v03() = 0;
++	virtual int v04() = 0; virtual int v05() = 0; virtual int v06() = 0; virtual int v07() = 0;
++	virtual int v08() = 0; virtual int v09() = 0; virtual int v10() = 0; virtual int v11() = 0;
++	virtual int v12() = 0; virtual int v13() = 0; virtual int v14() = 0; virtual int v15() = 0;
++	virtual int v16() = 0; virtual int v17() = 0; virtual int v18() = 0; virtual int v19() = 0;
++	virtual int v20() = 0; virtual int v21() = 0; virtual int v22() = 0; virtual int v23() = 0;
++	virtual int v24() = 0; virtual int v25() = 0; virtual int v26() = 0; virtual int v27() = 0;
+ 	virtual bool FiresFromMuzzle() = 0;                                        // 28 (0x70)
+ 	virtual bool Converges() = 0;                                              // 29 (0x74)
+-	virtual void v30() = 0; virtual void v31() = 0;
++	virtual int v30() = 0; virtual int v31() = 0;
+ 
+ protected:
+ 	~WeaponDesc() {}
+diff --git a/game/src/sof_game.h b/game/src/sof_game.h
+index 9d4f066..5b85f5c 100644
+--- a/game/src/sof_game.h
++++ b/game/src/sof_game.h
+@@ -68,7 +68,8 @@ typedef struct trace_s {
+ } trace_t;
+ 
+ // SPEC-001 #53 filter: accept (non-zero) or reject a hit
+-typedef int (*tracefilter_t)(trace_t *tr);
++// the engine calls filter(tr, start, sweepend) (engine game_api.h sof_tracefilter_t); wasm needs the exact signature
++typedef int (*tracefilter_t)(trace_t *tr, const float *start, const float *sweepend);
+ 
+ typedef void (*cvarcallback_t)(cvar_t *cv);
+ 
+diff --git a/modules/sound/CMakeLists.txt b/modules/sound/CMakeLists.txt
+index 72dbb8c..ff4f7d6 100644
+--- a/modules/sound/CMakeLists.txt
++++ b/modules/sound/CMakeLists.txt
+@@ -14,7 +14,13 @@ if(WIN32 AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+ endif()
+ include(${CMAKE_CURRENT_SOURCE_DIR}/../../tools/build/OMModuleExports.cmake)
+ 
+-find_package(OpenAL CONFIG REQUIRED)
++if(EMSCRIPTEN)
++  # Emscripten's built-in OpenAL (Web Audio)
++  add_library(OpenAL::OpenAL INTERFACE IMPORTED)
++  set_target_properties(OpenAL::OpenAL PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${OM_OPENAL_HEADERS}")
++else()
++  find_package(OpenAL CONFIG REQUIRED)
++endif()
+ 
+ add_library(OMsnd SHARED
+   src/snd_dma.c
+diff --git a/modules/sound/src/snd_voice.c b/modules/sound/src/snd_voice.c
+index 91c0ddd..d22bbd6 100644
+--- a/modules/sound/src/snd_voice.c
++++ b/modules/sound/src/snd_voice.c
+@@ -150,8 +150,10 @@ static void build_attrs(void)
+     attrs[n++] = MAX_CHANNELS + 16;
+     attrs[n++] = ALC_STEREO_SOURCES;
+     attrs[n++] = 16;
+-    attrs[n++] = ALC_OUTPUT_LIMITER_SOFT;
+-    attrs[n++] = om_limiter->value ? ALC_TRUE : ALC_FALSE;
++    if (dev && alcIsExtensionPresent(dev, "ALC_SOFT_output_limiter")) {
++        attrs[n++] = ALC_OUTPUT_LIMITER_SOFT;
++        attrs[n++] = om_limiter->value ? ALC_TRUE : ALC_FALSE;
++    }
+     if (dev && alcIsExtensionPresent(dev, "ALC_SOFT_HRTF")) {
+         attrs[n++] = ALC_HRTF_SOFT;
+         attrs[n++] = om_hrtf->value > 0 ? ALC_TRUE : om_hrtf->value < 0 ? ALC_DONT_CARE_SOFT : ALC_FALSE;
+@@ -173,7 +175,8 @@ static void read_device_state(void)
+         alcGetIntegerv(dev, ALC_HRTF_SOFT, 1, &v);
+     dev_hrtf = v;
+     v = 0;
+-    alcGetIntegerv(dev, ALC_OUTPUT_LIMITER_SOFT, 1, &v);
++    if (alcIsExtensionPresent(dev, "ALC_SOFT_output_limiter"))
++        alcGetIntegerv(dev, ALC_OUTPUT_LIMITER_SOFT, 1, &v);
+     dev_limiter = v;
+ }
+ 
+@@ -199,6 +202,13 @@ qboolean Vo_Init(const char *wavefile)
+     }
+     build_attrs();
+     ctx = alcCreateContext(dev, attrs);
++    if (!ctx) {
++        /* OpenAL Soft ignores attributes it does not know; stricter implementations (the browser's
++           Web Audio OpenAL, which has no ALC_REFRESH) reject the whole list. Retry with the rate only. */
++        attrs[2] = 0;
++        Snd_Printf("OMsnd: context attributes rejected, retrying with the output rate only\n");
++        ctx = alcCreateContext(dev, attrs);
++    }
+     if (!ctx || !alcMakeContextCurrent(ctx)) {
+         Snd_Printf("OMsnd: cannot create an OpenAL context\n");
+         if (ctx)
+@@ -216,9 +226,10 @@ qboolean Vo_Init(const char *wavefile)
+     have_spatialize = alIsExtensionPresent("AL_SOFT_source_spatialize");
+     have_loop_points = alIsExtensionPresent("AL_SOFT_loop_points");
+     have_radius = alIsExtensionPresent("AL_EXT_SOURCE_RADIUS");
+-    p_defer = (LPALDEFERUPDATESSOFT)alGetProcAddress("alDeferUpdatesSOFT");
+-    p_process = (LPALPROCESSUPDATESSOFT)alGetProcAddress("alProcessUpdatesSOFT");
+-    have_defer = alIsExtensionPresent("AL_SOFT_deferred_updates") && p_defer && p_process;
++    have_defer = alIsExtensionPresent("AL_SOFT_deferred_updates");
++    p_defer = have_defer ? (LPALDEFERUPDATESSOFT)alGetProcAddress("alDeferUpdatesSOFT") : NULL;
++    p_process = have_defer ? (LPALPROCESSUPDATESSOFT)alGetProcAddress("alProcessUpdatesSOFT") : NULL;
++    have_defer = have_defer && p_defer && p_process;
+     p_reopen = alcIsExtensionPresent(dev, "ALC_SOFT_reopen_device")
+                    ? (LPALCREOPENDEVICESOFT)alcGetProcAddress(dev, "alcReopenDeviceSOFT")
+                    : NULL;
+diff --git a/player/src/om_player_api.h b/player/src/om_player_api.h
+index 5d3bd61..e07d003 100644
+--- a/player/src/om_player_api.h
++++ b/player/src/om_player_api.h
+@@ -117,8 +117,8 @@ struct PlayerServerImport {
+     void (*SZ_Init)(sizebuf_t *, unsigned char *data, int maxsize); /* 33 */
+     void (*SZ_Clear)(sizebuf_t *);                   /* 34 */
+     void (*SZ_Write)(sizebuf_t *, const void *, int); /* 35 */
+-    void (*WriteChunk)(int fourcc, const void *data, int len); /* 36 */
+-    void (*ReadChunk)(int fourcc, void *dst, int len, void **alloc); /* 37 */
++    int (*WriteChunk)(int fourcc, const void *data, int len); /* 36: returns int like the game's (wasm signature) */
++    int (*ReadChunk)(int fourcc, void *dst, int len, void **alloc); /* 37: returns int like the game's (wasm signature) */
+ };
+ static_assert(sizeof(PlayerServerImport) == 152 || sizeof(void *) != 4, "SPEC-003: 152 bytes");
+ 
+diff --git a/tools/build/OMModuleExports.cmake b/tools/build/OMModuleExports.cmake
+index f0bf182..3b6d670 100644
+--- a/tools/build/OMModuleExports.cmake
++++ b/tools/build/OMModuleExports.cmake
+@@ -5,6 +5,12 @@
+ # always bind inside the module, never to same-named symbols of the engine executable or another module.
+ # (Linux build, docs/BUILD-linux.md)
+ function(om_elf_module_exports target deffile)
++  if(EMSCRIPTEN)
++    # Emscripten side module, loaded by the engine with dlopen
++    set_target_properties(${target} PROPERTIES SUFFIX ".so")
++    target_link_options(${target} PRIVATE -sSIDE_MODULE=1)
++    return()
++  endif()
+   if(WIN32 OR APPLE)
+     return()
+   endif()

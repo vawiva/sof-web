@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.cache/
+# engine build output (npm run engine); never commit binaries
+public/engine/
+# never place original game data anywhere in this repository
+*.pak
+*.PAK
+*.bsp
+*.ghb
+*.m32
+*.adp
+# LAN host certificates (private keys; created by server/make-cert.sh)
+server/certs/
