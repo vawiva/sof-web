@@ -34,6 +34,7 @@ interface EmscriptenModule {
   callMain(args: string[]): void;
   ccall(name: string, ret: null, types: string[], args: unknown[]): void;
   ccall(name: string, ret: 'number', types: string[], args: unknown[]): number;
+  ccall(name: string, ret: 'string', types: string[], args: unknown[]): string;
   FS: EmscriptenFS;
   IDBFS: unknown;
 }
@@ -90,6 +91,8 @@ export interface StartOptions {
   cacheBytes?: number;
   /** engine command-line arguments, built from the stored profile (config.cfg text, or null on first start) */
   args?: (configText: string | null) => string[];
+  /** values the engine reads from its Module object (browser patches: wideAspect, frameCap) */
+  moduleProps?: Record<string, unknown>;
   /** config text executed once, when the profile has no config.cfg yet */
   firstRunConfig?: string;
   signal?: AbortSignal;
@@ -105,6 +108,8 @@ const BLOCK_BYTES = 1 << 20;
 const DEFAULT_CACHE_BYTES = 48 << 20; // measured: 96 MB -> 48 MB saves ~50 MB for ~0.2 s more per level load
 
 const engineBase = () => new URL(`${import.meta.env.BASE_URL}engine/`, document.baseURI);
+/** An engine file of this build (the service worker keeps exactly these URLs for offline play). */
+const engineUrl = (name: string) => { const u = new URL(name, engineBase()); u.searchParams.set('v', __ENGINE_VERSION__); return u; };
 
 let started = false;
 
@@ -127,7 +132,7 @@ export async function startEngine(opts: StartOptions): Promise<EngineSession> {
   for (const [i, [name, dst]] of ENGINE_FILES.entries()) {
     signal?.throwIfAborted();
     report({ phase: 'engine', label: name, done: i, total: ENGINE_FILES.length });
-    const res = await fetch(new URL(name, engineBase()), { signal });
+    const res = await fetch(engineUrl(name), { signal });
     if (!res.ok) throw new Error(`Engine file ${name} could not be loaded (HTTP ${res.status}).`);
     engineFiles.push([dst, new Uint8Array(await res.arrayBuffer())]);
   }
@@ -176,7 +181,7 @@ export async function startEngine(opts: StartOptions): Promise<EngineSession> {
       net.close();
       void persist().finally(() => opts.onQuit?.());
     }
-  }, net);
+  }, net, opts.moduleProps);
   const FS = module.FS;
   FS.mkdirTree('/sof/base');
   FS.mkdirTree('/sof/user');
@@ -257,9 +262,11 @@ function syncfs(FS: EmscriptenFS, populate: boolean): Promise<void> {
 const printHooks: Array<(line: string) => void> = [];
 
 function loadEngineScript(canvas: HTMLCanvasElement, print: (s: string) => void,
-  onExit: ((reason: string) => void) | undefined, onQuit: () => void, net: GatewayTransport): Promise<EmscriptenModule> {
+  onExit: ((reason: string) => void) | undefined, onQuit: () => void, net: GatewayTransport,
+  props: Record<string, unknown> = {}): Promise<EmscriptenModule> {
   return new Promise((resolve, reject) => {
     const m = {
+      ...props,
       canvas,
       noInitialRun: true,
       print: (s: string) => { print(s); for (const h of printHooks) h(s); },
@@ -267,13 +274,13 @@ function loadEngineScript(canvas: HTMLCanvasElement, print: (s: string) => void,
       onQuit,
       netSend: (ip: Uint8Array, port: number, data: Uint8Array) => net.send(ip, port, data),
       netRecv: () => net.recv(),
-      locateFile: (path: string) => new URL(path, engineBase()).href,
+      locateFile: (path: string) => engineUrl(path).href,
       onAbort: (what: unknown) => onExit?.(`The engine stopped: ${String(what)}`),
     } as Partial<EmscriptenModule> & { locateFile: (p: string) => string };
     m.onRuntimeInitialized = () => resolve(m as EmscriptenModule);
     (window as unknown as { Module: unknown }).Module = m;
     const script = document.createElement('script');
-    script.src = new URL('openMerc.js', engineBase()).href;
+    script.src = engineUrl('openMerc.js').href;
     script.onerror = () => reject(new Error('The engine script could not be loaded.'));
     document.body.appendChild(script);
   });

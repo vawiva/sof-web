@@ -52,8 +52,9 @@ emcmake cmake -S "$SRC/engine" -B "$CACHE/build-engine" "${common[@]}" \
 emcmake cmake -S "$SRC/game" -B "$CACHE/build-game" "${common[@]}" -DOM_G3_TESTS=OFF
 emcmake cmake -S "$SRC/player" -B "$CACHE/build-player" "${common[@]}"
 emcmake cmake -S "$SRC/modules/sound" -B "$CACHE/build-sound" "${common[@]}" "-DOM_OPENAL_HEADERS=$AL"
+# BUILD_JOBS bounds the parallel compiler processes (each emcc can take hundreds of MB): 4 by default
 for b in engine game player sound; do
-	cmake --build "$CACHE/build-$b" --target all
+	cmake --build "$CACHE/build-$b" --target all --parallel "${BUILD_JOBS:-4}"
 done
 # openMERC's own data archive (zz_openmerc.pak: replacement menus, fonts, key layout) is neither built nor
 # shipped: the port presents the game's original menus from the player's own archives.

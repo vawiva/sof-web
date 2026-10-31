@@ -17,6 +17,16 @@ is **not** included; each player uses their own copy.
 The OpenAL Soft 1.25.2 public headers are used only to compile the sound module (constants and declarations); the
 OpenAL implementation in the browser is Emscripten's. openMERC's own data archive with its fonts is not shipped.
 
+## Format readers in the page (this project's own code)
+
+The readers that import game data on the device (`src/files/`: ISO 9660, InstallShield 5 cabinets, the GOG Inno Setup
+installer, raw DEFLATE, LZMA/LZMA2, MD5) contain no third-party code. They were written from public format
+descriptions: ECMA-119 (ISO 9660) and the Joliet specification; RFC 1951 (DEFLATE) and RFC 1321 (MD5); Igor Pavlov's
+LZMA specification (public domain); the InstallShield cabinet layout as documented by the open-source unshield project
+(MIT; consulted as documentation, not copied); the Inno Setup loader and block layout as documented by the Inno Setup
+sources and innoextract (consulted as documentation). The GOG piece layout was established by reading the installer's
+own records (see docs/INSTALL_ON_DEVICE.md).
+
 ## Used only by the optional local servers (not part of the page)
 
 | Component | Where | License |

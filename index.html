@@ -3,31 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Soldier of Fortune - browser port</title>
+  <meta name="theme-color" content="#0d0f0c">
+  <title>Soldier of Fortune Web</title>
   <meta name="description" content="Play Soldier of Fortune (2000) in your browser with your own game files. Nothing is uploaded.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SoF Web">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <!-- with credentials: the LAN host admits paired devices only, by cookie -->
+  <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
   <link rel="stylesheet" href="/src/app/style.css">
 </head>
 <body>
   <main id="startup" aria-live="polite">
-    <header class="hero">
-      <h1>Soldier of Fortune</h1>
-      <p class="sub">Raven Software, 2000 · browser port using the openMERC engine (WebAssembly)</p>
+    <header class="topbar">
+      <span class="brand"><span class="brand-mark" aria-hidden="true"></span>Soldier of Fortune <b>Web</b></span>
+      <nav class="topnav" aria-label="Sections">
+        <a href="#settings">Settings</a><a href="#saves">Saves</a><a href="#help">Help</a>
+      </nav>
     </header>
 
-    <section data-state="welcome choose" class="card">
-      <h2>Your game files stay on this device</h2>
-      <p>This page plays the game from <strong>your own copy</strong> of Soldier of Fortune. Your files are read
-        locally by this browser tab; they are never uploaded. Only the engine itself is downloaded from this site.</p>
-      <p><strong>Tested edition:</strong> <span id="tested-edition"></span>. Other 1.07f installations may work but
-        are marked unverified.</p>
-      <ul id="capabilities" class="caps"></ul>
+    <section class="hero">
+      <p class="kicker">Raven Software · 2000 · in your browser</p>
+      <h1>Soldier of Fortune <span>Web</span></h1>
+      <p class="lede">The original game, with its own menus, campaign and saves, running in this browser from
+        <strong>your own copy</strong>. Your game files are read where they are and never uploaded.</p>
+
+      <div class="status" id="data-status">
+        <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+        <div>
+          <div class="status-title" id="status-title">Game data: not selected</div>
+          <div class="status-detail" id="status-detail">Choose your Soldier of Fortune folder below.</div>
+        </div>
+      </div>
+
+      <div id="install-gate" class="panel install" hidden>
+        <h2>Install the app to play on this device</h2>
+        <p>On phones and tablets the game runs as an app from your Home Screen (full screen, no browser bars). This page
+          stays available for setup and help.</p>
+        <ol id="install-ios" hidden>
+          <li>Open this page in <strong>Safari</strong>.</li>
+          <li>Tap <strong>Share</strong> (the square with an arrow) → <strong>Add to Home Screen</strong>; keep
+            <strong>Open as Web App</strong> on if it is offered → <strong>Add</strong>.</li>
+          <li>Open <strong>Soldier of Fortune Web</strong> from its Home Screen icon.</li>
+          <li>Continue setup and press <strong>Play</strong> there.</li>
+        </ol>
+        <div id="install-android" hidden>
+          <div class="actions"><button id="install-btn" type="button" class="primary" hidden>Install app</button>
+            <button id="install-skip" type="button" class="secondary">Continue in browser</button></div>
+          <p class="note">Recommended: the installed app has the whole screen. You can also play in this browser tab.</p>
+          <ol>
+            <li>Tap <strong>Install app</strong> above, or open the browser menu (⋮) → <strong>Install app</strong> /
+              <strong>Add to Home screen</strong>.</li>
+            <li>Open <strong>Soldier of Fortune Web</strong> from its Home Screen icon.</li>
+            <li>Continue setup and press <strong>Play</strong> there.</li>
+          </ol>
+        </div>
+        <p class="note" id="install-note">The installed app keeps its own settings and saves: they are not shared with
+          this browser tab. To take saves along, use Export here and Import in the app (Saves and storage).</p>
+        <p class="note" id="cert-note" hidden></p>
+      </div>
+
+      <div id="last-session" class="panel notice" hidden>
+        <h2 id="last-session-title">The last game session did not end normally</h2>
+        <p id="last-session-text"></p>
+        <p class="note">Your saves are kept up to the last automatic store. A report of the session's last moments is
+          kept on this device only (access keys removed).</p>
+        <div class="actions"><button id="last-session-copy" type="button" class="secondary">Copy report</button>
+          <button id="last-session-dismiss" type="button" class="secondary">Dismiss</button></div>
+        <pre id="last-session-report" class="diag" hidden></pre>
+      </div>
+
+      <div id="aim-update" class="panel notice" hidden>
+        <h2>Updated recommended controls</h2>
+        <p>Turning is faster in this version (touch and controller). <span id="aim-update-note"></span></p>
+        <div class="actions"><button id="aim-apply" type="button" class="primary">Apply updated recommended controls</button>
+          <button id="aim-keep" type="button" class="secondary">Keep my settings</button></div>
+      </div>
+
+      <div id="host-problem" class="panel error" hidden role="alert">
+        <h2 id="host-problem-title"></h2>
+        <p id="host-problem-text"></p>
+        <div class="actions"><button id="host-retry" type="button">Try again</button>
+          <a class="button secondary" id="host-pair" href="lan/pair" hidden>Pair this device</a></div>
+      </div>
+
+      <div data-state="ready" class="play-actions">
+        <button id="play-fullscreen" type="button" class="primary big">Play fullscreen</button>
+        <button id="play" type="button" class="primary-outline big">Play in this window</button>
+      </div>
+      <div data-state="ready" class="ready-extra">
+        <div id="unverified" class="warn" hidden></div>
+        <p id="ready-summary" class="note"></p>
+        <label class="check" id="remember-row"><input id="remember" type="checkbox"> Remember this folder on this
+          device (only the folder permission is stored, not a copy of the files)</label>
+        <button id="reselect" type="button" class="link">Choose other files</button>
+      </div>
     </section>
 
-    <section data-state="choose" class="card">
+    <section data-state="choose" class="panel">
       <h2>Choose your game folder</h2>
       <p>Select the installation folder (for example <code>Soldier of Fortune</code>) or its <code>base</code> folder.
-        The files <code>pak0.pak</code>, <code>pak1.pak</code>, <code>pak2.pak</code>, <code>pak3.pak</code> and
-        <code>gs.pak</code> are needed (about 785&nbsp;MB).</p>
+        Needed: <code>pak0.pak</code>–<code>pak3.pak</code> and <code>gs.pak</code> (about 785&nbsp;MB, version 1.07f).</p>
       <div class="actions">
         <button id="pick-handle" type="button" hidden>Choose folder (can be remembered)</button>
         <label class="button" for="pick-folder">Choose folder</label>
@@ -37,89 +117,223 @@
         <button id="continue-handle" type="button" hidden>Continue with remembered folder</button>
       </div>
       <div id="drop" class="drop" tabindex="0">…or drop the folder here</div>
-      <p class="note">Disc images (ISO/BIN/CUE), installers and archives are not read directly: install the game first.
-        A browser's file dialog may need a mouse, keyboard or touch; once files are chosen, everything else works with a
-        controller.</p>
+      <p class="note">The GOG installer and the 2001 Platinum CD image can be imported (unpacked, never run) under
+        <strong>Keep the game on this device</strong>. On a phone, you can also let the PC host the files (Help → Play on a phone).</p>
     </section>
 
-    <section data-state="validating preparing" class="card">
+    <section class="panel" id="device-install" data-state="welcome choose ready error" hidden>
+      <h2>Keep the game on this device</h2>
+      <p id="inst-status">Not stored on this device.</p>
+      <div class="actions" id="inst-actions">
+        <button id="inst-current" type="button" class="primary" hidden>Keep the selected files on this device</button>
+        <button id="inst-pc" type="button" hidden>Download and keep the game from my PC</button>
+        <label class="button secondary" for="inst-pick" id="inst-pick-label">Import game files or disc image…</label>
+        <input id="inst-pick" type="file" multiple hidden>
+        <button id="inst-resume" type="button" hidden>Resume</button>
+      </div>
+      <div id="inst-run" hidden>
+        <progress id="inst-progress" max="1" value="0"></progress>
+        <p id="inst-label" class="note"></p>
+        <button id="inst-cancel" type="button" class="secondary">Cancel</button>
+      </div>
+      <p id="inst-problem" class="warn" hidden></p>
+      <details class="group" id="inst-manage"><summary>Storage on this device</summary>
+        <p id="inst-storage" class="note">Checking…</p>
+        <div class="actions">
+          <button id="inst-verify" type="button" class="secondary" hidden>Verify stored game data</button>
+          <button id="inst-remove" type="button" class="secondary" hidden>Remove game data (keeps saves)</button>
+        </div>
+        <p class="note">Import accepts the five archives (<code>pak0.pak</code>–<code>pak3.pak</code>, <code>gs.pak</code>) or the
+          2001 Platinum CD image (<code>.iso</code>). Only these archives are kept (about 785&nbsp;MB); nothing is uploaded.
+          Saves and settings are stored separately and stay when the game data is removed.</p>
+        <p class="note" id="inst-origin"></p>
+      </details>
+    </section>
+
+    <section data-state="validating preparing" class="panel">
       <h2 id="progress-title">Checking files…</h2>
       <progress id="progress" max="1" value="0"></progress>
       <p id="progress-label" class="note"></p>
       <button id="cancel" type="button" class="secondary">Cancel</button>
     </section>
 
-    <section data-state="ready" class="card">
-      <h2>Ready</h2>
-      <p id="ready-summary"></p>
-      <div id="unverified" class="warn" hidden></div>
-      <div class="actions">
-        <button id="play-fullscreen" type="button" class="primary">Play fullscreen</button>
-        <button id="play" type="button" class="primary">Play in this window</button>
-        <button id="reselect" type="button" class="secondary">Choose other files</button>
-      </div>
-      <p class="note">The game starts with its original start-up and main menu and fills this browser window at its
-        original 4:3 shape (black bars where the window is wider or taller). Load, save, settings and quitting are in
-        the game's own menu (Esc). <strong>Quit</strong> in the game's main menu stores your settings and saves and
-        returns to this page.</p>
-      <label class="check" id="remember-row"><input id="remember" type="checkbox"> Remember this folder on this device (only the folder
-        permission is stored, not a copy of the files)</label>
-    </section>
-
-    <section data-state="error" class="card error" role="alert">
+    <section data-state="error" class="panel error" role="alert">
       <h2>These files can't be used</h2>
       <ul id="error-list"></ul>
       <button id="retry" type="button">Choose files again</button>
     </section>
 
-    <section data-state="welcome choose ready" class="card">
-      <h2>Controls</h2>
-      <details open><summary>Keyboard and mouse (game defaults)</summary><dl id="help-kbm" class="help"></dl></details>
-      <details><summary>Controller</summary>
+    <div class="grid" data-state="welcome choose ready">
+      <section class="panel" id="multiplayer">
+        <h2>Multiplayer</h2>
+        <p id="mp-status" class="mp-status">Checking…</p>
+        <p class="note">Joining happens in the game's own menu: Multiplayer → Join → Refresh lists the servers this PC
+          forwards to. There is no internet server list, and this page cannot host a server for other devices.</p>
+      </section>
+      <section class="panel" id="saves">
+        <h2>Saves and storage</h2>
+        <p id="profile-summary" class="note">…</p>
+        <p class="note">The game saves and loads in its own menu; this browser keeps those saves and the game's
+          settings. Export makes a backup file another browser can import. Nothing is synchronised between devices.</p>
+        <div class="actions">
+          <button id="export-saves" type="button" class="secondary">Export saves</button>
+          <label class="button secondary" for="import-saves">Import saves</label>
+          <input id="import-saves" type="file" accept="application/json,.json" hidden>
+          <button id="delete-saves" type="button" class="danger">Delete settings and saves</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" id="settings" data-state="welcome choose ready">
+      <h2>Settings</h2>
+      <p class="note">Settings of this page, kept in this browser; they apply the next time the game starts. The
+        game's own options (keys, sound, video) are in its menu.</p>
+
+      <details class="group"><summary>Display</summary>
+        <div class="fields">
+          <label>Picture <select id="display-aspect"><option value="4:3">4:3, as the original (black bars on wider screens)</option><option value="16:9">widescreen 16:9</option><option value="fill">widescreen, fill the screen (up to 2.4:1)</option></select></label>
+          <label>Frame rate <select id="display-fps"><option value="60">60 per second</option><option value="display">as fast as the display refreshes</option><option value="30">30 per second (saves battery)</option></select></label>
+          <p class="note">Widescreen shows more at the sides; menus, the HUD's proportions and cinematics keep the
+            original 4:3 framing. The frame rate changes only how often a picture is drawn, not the game's speed.
+            <span id="display-hz"></span></p>
+        </div>
+      </details>
+
+      <details class="group" id="input-group"><summary>Controls: input mode and touch</summary>
+        <div class="fields">
+          <label>Input mode <select id="touch-mode">
+            <option value="auto">Automatic: touch controls while touching, hidden while a keyboard, mouse or controller is used</option>
+            <option value="touch">Touch: always show the touch controls</option>
+            <option value="controller">Controller: no touch controls in play (touch still works in menus)</option>
+            <option value="off">Keyboard and mouse: no touch controls</option></select></label>
+          <label>Look speed, horizontal <input id="touch-lookx" type="range" min="0.05" max="1" step="0.01"><output for="touch-lookx"></output></label>
+          <label>Look speed, vertical <input id="touch-looky" type="range" min="0.05" max="1" step="0.01"><output for="touch-looky"></output></label>
+          <label>Aiming speed when zoomed <input id="touch-aim" type="range" min="0.2" max="2" step="0.05"><output for="touch-aim"></output></label>
+          <label class="check"><input id="touch-invert" type="checkbox"> Invert vertical look</label>
+          <label class="check"><input id="touch-firelook" type="checkbox"> Drag the Fire button to look while firing</label>
+          <label class="check"><input id="touch-leftfire" type="checkbox"> Extra Fire button on the movement side</label>
+          <label class="check"><input id="touch-left" type="checkbox"> Left-handed (movement on the right, look and Fire on the left)</label>
+          <label>Button size <input id="touch-scale" type="range" min="0.75" max="1.5" step="0.05"><output for="touch-scale"></output></label>
+          <label>Button opacity <input id="touch-opacity" type="range" min="0.15" max="1" step="0.05"><output for="touch-opacity"></output></label>
+          <label>Buttons from the side edges <input id="touch-edgex" type="range" min="0" max="160" step="4"><output for="touch-edgex"></output></label>
+          <label>Buttons from the bottom and top <input id="touch-edgey" type="range" min="0" max="160" step="4"><output for="touch-edgey"></output></label>
+          <p class="note">Look speed is degrees of turn per pixel of finger travel: the same swipe turns the same
+            amount at any resolution, picture shape or frame rate. Look follows the finger directly, without
+            acceleration or smoothing.</p>
+          <button id="touch-reset" type="button" class="secondary">Reset touch settings</button>
+        </div>
+      </details>
+
+      <details class="group" id="pad-group"><summary>Controller</summary>
+        <div class="fields">
+          <label>Use controller <select id="pad-choice"><option value="auto">automatic (the one in use)</option></select></label>
+          <label>Look speed, horizontal <input id="pad-yaw" type="range" min="60" max="400" step="10"><output for="pad-yaw"></output></label>
+          <label>Look speed, vertical <input id="pad-pitch" type="range" min="40" max="400" step="10"><output for="pad-pitch"></output></label>
+          <label>Stick dead zone <input id="pad-dead" type="range" min="0.05" max="0.4" step="0.01"><output for="pad-dead"></output></label>
+          <label>Response curve <select id="pad-curve"><option value="balanced">balanced (default)</option><option value="linear">linear: speed grows evenly with the stick</option><option value="precise">precise: slower near the centre</option></select></label>
+          <label class="check"><input id="pad-invert" type="checkbox"> Invert vertical look</label>
+          <label class="check"><input id="pad-boost" type="checkbox"> Turn boost: held at the edge, horizontal turning speeds up by a further 220°/s within 0.35 s (off by default)</label>
+          <p class="note">Look speed is degrees per second at full deflection (no hidden boost unless Turn boost is on);
+            the response curve sets how much of it partial deflections give. Left stick moves, right stick looks; the
+            buttons are listed under Help.</p>
+          <div class="actions">
+            <button id="pad-calibrate" type="button" class="secondary">Calibrate / remap this controller</button>
+            <button id="pad-reset-map" type="button" class="secondary">Reset its mapping</button>
+            <button id="pad-reset" type="button" class="secondary">Reset controller settings</button>
+          </div>
+          <div id="calib" class="calib" hidden aria-live="assertive">
+            <p id="calib-step"></p>
+            <div class="actions"><button id="calib-next" type="button">Next</button><button id="calib-skip" type="button" class="secondary">Skip</button><button id="calib-cancel" type="button" class="secondary">Cancel</button></div>
+          </div>
+        </div>
+      </details>
+
+      <details class="group" id="diag-group"><summary>Input diagnostics</summary>
+        <div class="fields">
+          <p class="note">Shows what this browser reports and what the game would receive. Press a button on the
+            controller once: browsers reveal a controller only after it is used on the open page.</p>
+          <div class="actions"><button id="diag-copy" type="button" class="secondary">Copy report</button><span id="diag-copied" class="note" aria-live="polite"></span></div>
+          <pre id="diag" class="diag">…</pre>
+          <label class="check"><input id="diag-ingame" type="checkbox"> Also show a small diagnostics readout during
+            play (off by default; not part of the original game)</label>
+        </div>
+      </details>
+
+      <details class="group" id="sessions-group"><summary>Game session reports</summary>
+        <div class="fields">
+          <p class="note">What the game was doing in the last two sessions, kept on this device only (access keys
+            removed): versions, game data, level and cinematic changes, skip presses, stalls and errors. Copy one when
+            reporting a problem.</p>
+          <p class="note">Running versions: <span id="build-info">…</span></p>
+          <div class="actions"><button id="sessions-copy" type="button" class="secondary">Copy reports</button>
+            <button id="sessions-forget" type="button" class="secondary">Delete reports</button><span id="sessions-copied" class="note" aria-live="polite"></span></div>
+          <pre id="sessions" class="diag">No game session recorded yet.</pre>
+        </div>
+      </details>
+
+      <details class="group"><summary>Advanced</summary>
+        <div class="fields">
+          <label class="check"><input id="dev-console" type="checkbox"> Enable the game's console key (~). Off in the
+            original game, as here by default.</label>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel" id="help" data-state="welcome choose ready">
+      <h2>Help</h2>
+      <details class="group"><summary>Keyboard and mouse (game defaults)</summary><dl id="help-kbm" class="help"></dl></details>
+      <details class="group"><summary>Controller</summary>
         <p>Left stick moves, right stick looks. Start opens the game menu.</p><dl id="help-pad" class="help"></dl></details>
-      <details><summary>Touch</summary>
-        <p>Left side: drag to move (push fully to run). Right side: drag to look, tap to click menu items.
-          On-screen buttons cover firing, jumping, crouching, using, reloading, weapons, items, leaning, objectives
-          and the menu. Size, opacity and a left-handed layout can be changed below.</p></details>
+      <details class="group"><summary>Touch</summary>
+        <p>Left thumb: drag anywhere on the left half to move; push fully to run. Right side: drag to look, lift to stop.
+          Buttons: Fire, Jump, Crouch, Alt fire, Use, Reload, weapons; on the left Menu, objectives, lean and items.
+          In the game's menus, tap items directly. Mobile play is landscape only.</p></details>
+      <details class="group"><summary>Play on a phone</summary>
+        <p>Let your PC host the game files: run the LAN host on the PC (see the project's LAN guide), open the tester
+          link it prints on the phone and accept its certificate. The phone then shows the PC's game data as ready;
+          nothing is copied to the phone. Controllers need this HTTPS link: browsers hide controllers on plain
+          http addresses. To play without the PC later, use <strong>Download and keep the game from my PC</strong>
+          once.</p></details>
+      <details class="group"><summary>Installers and disc images</summary>
+        <p>Under <strong>Keep the game on this device → Import game files or disc image…</strong> you can choose:</p>
+        <ul>
+          <li>the GOG installer <code>setup_soldier_of_fortune_1.07f_hotfix_(54919).exe</code> (one file, Inno Setup
+            5.6.2): it is read like an archive, nothing of it runs;</li>
+          <li>an <code>.iso</code> image of the 2001 Platinum CD: its InstallShield set is read;</li>
+          <li>or the five archives <code>pak0.pak</code>–<code>pak3.pak</code> and <code>gs.pak</code>.</li>
+        </ul>
+        <p class="note">Only the five archives are kept (about 785&nbsp;MB, plus temporary use while unpacking); every
+          one is checked against the installer's own checksum. Other installers (other Inno Setup versions, installers with
+          separate .bin files), BIN/CUE images and multi-disc sets are not supported.</p></details>
+      <details class="group"><summary>Requirements</summary><ul id="capabilities" class="caps"></ul>
+        <p class="note">Tested edition: <span id="tested-edition"></span>. Other 1.07f installations may work but are
+          marked unverified.</p></details>
+      <p class="note">Quit in the game's main menu stores settings and saves and returns to this page.</p>
     </section>
 
-    <section data-state="welcome choose ready" class="card">
-      <h2>Browser settings</h2>
-      <p class="note">Tools of this web page, not of the game. The game's own saves are made and loaded in its
-        menus; this browser keeps them, together with its settings, until you delete them here. Export makes a
-        backup file that another browser can import.</p>
-      <p id="profile-summary" class="note">…</p>
-      <div class="actions">
-        <button id="export-saves" type="button" class="secondary">Export saves</button>
-        <label class="button secondary" for="import-saves">Import saves</label>
-        <input id="import-saves" type="file" accept="application/json,.json" hidden>
-        <button id="delete-saves" type="button" class="danger">Delete settings and saves</button>
-      </div>
-      <fieldset class="touch-settings"><legend>Touch controls</legend>
-        <label>Show <select id="touch-mode"><option value="auto">on touch screens, until a keyboard, mouse or controller is used</option><option value="on">always</option><option value="off">never</option></select></label>
-        <label>Size <input id="touch-scale" type="range" min="0.75" max="1.5" step="0.05"></label>
-        <label>Opacity <input id="touch-opacity" type="range" min="0.15" max="1" step="0.05"></label>
-        <label>Look speed <input id="touch-look" type="range" min="0.5" max="4" step="0.1"></label>
-        <label class="check"><input id="touch-left" type="checkbox"> Left-handed</label>
-        <label class="check"><input id="touch-invert" type="checkbox"> Invert look</label>
-      </fieldset>
-      <fieldset class="touch-settings"><legend>Advanced</legend>
-        <label class="check"><input id="dev-console" type="checkbox"> Enable the game's console key (~). Off in the
-          original game, as here by default.</label>
-      </fieldset>
-    </section>
-
-    <footer class="note">
-      Not affiliated with Raven Software or Activision. Engine: <a href="https://github.com/sidreshot/openMERC">openMERC</a>
-      (GPL-2.0-or-later) with browser patches; see <a href="engine/openMERC-LICENSE.txt">license</a> and
-      <a href="engine/openMERC-THIRD_PARTY.md">openMERC's third-party notices</a>; other components:
-      <a href="THIRD_PARTY_NOTICES.md">third-party notices</a>.
+    <footer class="note foot">
+      Soldier of Fortune Web is an unofficial project, not affiliated with Raven Software or Activision. Engine:
+      <a href="https://github.com/sidreshot/openMERC">openMERC</a> (GPL-2.0-or-later) with browser patches; see
+      <a href="engine/openMERC-LICENSE.txt">license</a>, <a href="engine/openMERC-THIRD_PARTY.md">openMERC's third-party
+      notices</a> and <a href="THIRD_PARTY_NOTICES.md">other third-party notices</a>.
     </footer>
   </main>
 
   <div id="game" hidden>
     <canvas id="canvas" tabindex="-1"></canvas>
-    <div id="game-error" class="card error" role="alert" hidden></div>
+    <div id="game-error" class="panel error" role="alert" hidden><p id="game-error-text"></p>
+      <div class="actions"><button id="game-error-back" type="button" class="primary">Back to the start page</button></div></div>
+    <pre id="diag-live" class="diag-live" hidden></pre>
+  </div>
+
+  <div id="rotate" class="overlay" hidden role="dialog" aria-labelledby="rotate-title">
+    <div class="rotate-icon" aria-hidden="true"></div>
+    <h2 id="rotate-title">Rotate your phone to landscape to play</h2>
+    <p class="note" id="rotate-note">The game is paused.</p>
+    <button id="rotate-back" type="button" class="secondary">Back to the start page</button>
+  </div>
+  <div id="resume" class="overlay" hidden>
+    <button id="resume-btn" type="button" class="primary big">Tap to resume</button>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

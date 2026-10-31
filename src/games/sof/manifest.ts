@@ -36,6 +36,19 @@ export const KNOWN_EDITIONS: Edition[] = [
       { file: 'gs.pak', entries: 39, size: 205126 },
     ],
   },
+  {
+    // the 2001 Platinum CD (InstallShield set): same game module as GOG 1.07f; pak0.pak differs from GOG's only in
+    // menus/b_lock.rmf (the parental-lock button, which GOG emptied); pak1-3 and gs.pak are identical
+    id: 'cd-platinum-1.07f',
+    label: 'Platinum Edition 1.07f (2001 CD, English)',
+    paks: [
+      { file: 'pak0.pak', entries: 9728, size: 705825871 },
+      { file: 'pak1.pak', entries: 533, size: 20517183 },
+      { file: 'pak2.pak', entries: 499, size: 48985072 },
+      { file: 'pak3.pak', entries: 14, size: 9406518 },
+      { file: 'gs.pak', entries: 39, size: 205126 },
+    ],
+  },
 ];
 
 /** Entries the single-player campaign cannot start without (checked across all archives). */
@@ -50,7 +63,8 @@ export const REQUIRED_ENTRIES = [
 
 /** Formats people commonly have that this port cannot use, with a precise explanation. */
 export const UNSUPPORTED_HINTS: Array<{ test: RegExp; message: string }> = [
-  { test: /\.(iso|bin|cue|img|mdf|mds|nrg)$/i, message: 'Disc images are not read directly. Install the game (or mount the disc) and select the installed "base" folder.' },
-  { test: /\.(exe|msi)$/i, message: 'Installers are not run in the browser. Install the game first, then select its "base" folder.' },
+  { test: /\.iso$/i, message: 'The 2001 Platinum CD image (.iso) can be imported under "Keep the game on this device"; it is not played directly.' },
+  { test: /\.(bin|cue|img|mdf|mds|nrg)$/i, message: 'This disc-image format is not read. Use an .iso of the 2001 Platinum CD (under "Keep the game on this device"), or the installed "base" folder.' },
+  { test: /\.(exe|msi)$/i, message: 'Installers are not run or unpacked in the browser. Select the installed "base" folder (or import the 2001 CD image).' },
   { test: /\.(zip|7z|rar)$/i, message: 'Archives are not unpacked here. Extract them first and select the "base" folder.' },
 ];

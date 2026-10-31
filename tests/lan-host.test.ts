@@ -24,9 +24,13 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(tmp, 'dist', 'assets'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'dist', 'index.html'), '<!doctype html>');
   fs.writeFileSync(path.join(tmp, 'dist', 'assets', 'a.js'), 'x');
+  fs.mkdirSync(path.join(tmp, 'dist', 'icons'));
+  fs.writeFileSync(path.join(tmp, 'dist', 'icons', 'apple-touch-icon.png'), 'NEUTRAL');
+  fs.writeFileSync(path.join(tmp, 'dist', 'manifest.webmanifest'), '{}');
   fs.writeFileSync(path.join(tmp, 'secret.txt'), 'outside');
   const { found } = findArchives(path.join(tmp, 'install'));
-  server = http.createServer(createHandler({ dist: path.join(tmp, 'dist'), archives: found, key: KEY, secure: false }));
+  server = http.createServer(createHandler({ dist: path.join(tmp, 'dist'), archives: found, key: KEY, secure: false, mpServers: ['192.168.1.20:27910'],
+    pairCode: '123456', gameIcons: new Map([['apple-touch-icon.png', Buffer.from('GAMEICON')]]) }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -86,6 +90,11 @@ describe('server', () => {
     expect(JSON.parse(body).files.map((f: { name: string }) => f.name)).toEqual(['pak0.pak', 'pak1.pak', 'pak2.pak', 'pak3.pak', 'gs.pak']);
     expect(body).not.toContain(tmp.replace(/\\/g, '/').split('/').pop());
   });
+  it('reports the multiplayer servers to testers only', async () => {
+    const r = await get('/lan/status.json');
+    expect(await r.json()).toEqual({ version: 1, multiplayer: { servers: ['192.168.1.20:27910'] } });
+    expect((await fetch(base + '/lan/status.json')).status).toBe(403);
+  });
   it('serves byte ranges of the archives only', async () => {
     const r = await get('/gamedata/pak0.pak', { range: 'bytes=0-3' });
     expect(r.status).toBe(206);
@@ -100,5 +109,39 @@ describe('server', () => {
   it('serves the build and nothing but GET/HEAD', async () => {
     expect((await get('/assets/a.js')).status).toBe(200);
     expect((await fetch(`${base}/`, { method: 'POST', headers: { cookie: `sof_key=${KEY}` } })).status).toBe(405);
+  });
+});
+
+describe('pairing an installed app', () => {
+  const post = (code: string, headers: Record<string, string> = {}) => fetch(`${base}/lan/pair`, {
+    method: 'POST', body: new URLSearchParams({ code }), redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
+  });
+  it('shows the pairing page instead of the app to unpaired page loads', async () => {
+    const r = await fetch(`${base}/`, { headers: { accept: 'text/html' } });
+    expect(r.status).toBe(403);
+    const body = await r.text();
+    expect(body).toContain('Pair this device');
+    expect(body).not.toContain('<script');
+    const old = await fetch(`${base}/`, { headers: { accept: 'text/html', cookie: 'sof_key=old-key-0000000' } });
+    expect(await old.text()).toContain('paired with an earlier key');
+  });
+  it('serves the manifest and the neutral icon publicly, the game icon to paired devices only', async () => {
+    expect((await fetch(`${base}/manifest.webmanifest`)).status).toBe(200);
+    expect(await (await fetch(`${base}/icons/apple-touch-icon.png`)).text()).toBe('NEUTRAL');
+    expect(await (await get('/icons/apple-touch-icon.png')).text()).toBe('GAMEICON');
+    expect((await fetch(`${base}/gamedata/manifest.json`)).status).toBe(403);
+  });
+  it('pairs with the code or the key and sets a lasting cookie', async () => {
+    for (const code of ['123 456', KEY]) {
+      const r = await post(code);
+      expect(r.status).toBe(303);
+      expect(r.headers.get('set-cookie')).toMatch(/sof_key=.*Max-Age=2592000.*HttpOnly/);
+    }
+  });
+  it('refuses foreign origins and blocks pairing after repeated wrong codes', async () => {
+    expect((await post('123456', { origin: 'https://evil.example' })).status).toBe(403);
+    for (let i = 0; i < 10; i++) expect((await post('000000')).status).toBe(403);
+    expect((await post('123456')).status).toBe(429);
   });
 });

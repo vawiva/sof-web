@@ -1,5 +1,5 @@
 diff --git a/engine/CMakeLists.txt b/engine/CMakeLists.txt
-index 333db77..de0a3a0 100644
+index 333db77..c5ed140 100644
 --- a/engine/CMakeLists.txt
 +++ b/engine/CMakeLists.txt
 @@ -240,7 +240,14 @@ endif()
@@ -37,7 +37,7 @@ index 333db77..de0a3a0 100644
 +		target_compile_definitions(openMerc PRIVATE OM_SOF_ELF_EXPORTS)
 +		target_link_options(openMerc PRIVATE -sMAIN_MODULE=1 -sALLOW_MEMORY_GROWTH=1 -sMAX_WEBGL_VERSION=2
 +			-sMIN_WEBGL_VERSION=2 -sFULL_ES3=1 -sSTACK_SIZE=4MB -lopenal -lidbfs.js -lworkerfs.js
-+			-sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,IDBFS -sEXPORTED_FUNCTIONS=_main,_Cbuf_AddText,_CL_WriteConfiguration,_Browser_InputState,_Browser_StoreConfig -sINVOKE_RUN=0)
++			-sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall,IDBFS,HEAPU8 -sEXPORTED_FUNCTIONS=_main,_Cbuf_AddText,_CL_WriteConfiguration,_Browser_InputState,_Browser_StoreConfig,_Browser_Look,_Browser_Move,_Browser_PadState,_Browser_MapName,_Browser_Probe -sINVOKE_RUN=0)
 +	elseif(NOT APPLE)
  		# OpenMerc: the SoF engine functions OMsnd looks up by name (src/common/sof_exports.dynlist)
  		target_link_options(openMerc PRIVATE "-Wl,--dynamic-list=${CMAKE_CURRENT_SOURCE_DIR}/src/common/sof_exports.dynlist")
@@ -307,11 +307,113 @@ index 2290248..9ddbc7d 100644
  	exit(0);
  }
  
+diff --git a/engine/src/client/cl_hud.c b/engine/src/client/cl_hud.c
+index dbe2421..3f9bcd4 100644
+--- a/engine/src/client/cl_hud.c
++++ b/engine/src/client/cl_hud.c
+@@ -2074,6 +2074,18 @@ HUD_RemFave_f(void)
+ 	Com_Printf("Could not find %s to remove.\n", Cmd_Argv(1));
+ }
+ 
++/* SPEC-002 registration step 6: select the map's terrain set (an empty name = none) */
++void
++HUD_SetTerrain(const char *name)
++{
++	Com_DPrintf("terrain set: \"%s\"\n", name ? name : "");
++
++	if (HUD_Ref() && sre->SetTerrain)
++	{
++		sre->SetTerrain((char *)(name ? name : ""));
++	}
++}
++
+ static void
+ HUD_Terrain_f(void)
+ {
+diff --git a/engine/src/client/cl_input.c b/engine/src/client/cl_input.c
+index 5e4161c..abdee2e 100644
+--- a/engine/src/client/cl_input.c
++++ b/engine/src/client/cl_input.c
+@@ -365,11 +365,47 @@ CL_CinematicFreezeActive(void)
+ 	return CL_SoF_CurrentPS()->cinfreeze != 0;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++static int skip_realtime; /* cls.realtime of the last skip request */
++#endif
++
+ void
+ CL_RequestCinematicSkip(void)
+ {
+ 	skip_requested = true;
++#ifdef __EMSCRIPTEN__
++	skip_realtime = cls.realtime ? cls.realtime : 1;
++#endif
++}
++
++#ifdef __EMSCRIPTEN__
++/* browser port: Esc presses that belong to a skip already made - repeated taps of a touch Menu button or of a
++   controller's Start while the cinematic ends and the next map loads - must not open the main menu over the next
++   level (which pauses it and looks like a hang). Swallowed: within 2 s of a skip request, and while a single-player
++   level is loading after one (a local server with one player slot). */
++qboolean
++CL_SkipEscapeSwallowed(void)
++{
++	if (!skip_realtime)
++	{
++		return false;
++	}
++
++	if (cls.realtime - skip_realtime < 2000)
++	{
++		return true;
++	}
++
++	if ((cls.state != ca_active) && (cls.state >= ca_connecting) && Com_ServerState() &&
++		(Cvar_VariableValue("maxclients") <= 1) && (cls.realtime - skip_realtime < 30000))
++	{
++		return true;
++	}
++
++	skip_realtime = 0;
++	return false;
+ }
++#endif
+ 
+ /* SPEC-312 5.1: toggleconsole works only with the console cvar set; with
+    game key focus during a cinematic freeze it requests a skip instead */
+@@ -583,6 +619,9 @@ CL_BuildCmd(usercmd_t *cmd)
+ 		cmd->sidemove += mouse_accum.sidemove;
+ 		cmd->forwardmove += mouse_accum.forwardmove;
+ 		cmd->upmove += mouse_accum.upmove;
++
++		/* the sticks' movement, once per command */
++		IN_StickMove(cmd);
+ 	}
+ 	else if (skip_requested)
+ 	{
+diff --git a/engine/src/client/cl_keyboard.c b/engine/src/client/cl_keyboard.c
+index 680bf43..36f1514 100644
+--- a/engine/src/client/cl_keyboard.c
++++ b/engine/src/client/cl_keyboard.c
+@@ -1467,6 +1467,12 @@ Key_EventEx(int key, qboolean down, qboolean extended, unsigned time)
+ 				{
+ 					CL_RequestCinematicSkip(); /* SPEC-312 section 11 */
+ 				}
++#ifdef __EMSCRIPTEN__
++				else if ((cls.key_dest == key_game) && CL_SkipEscapeSwallowed())
++				{
++					/* part of the skip just made (CL_SkipEscapeSwallowed) */
++				}
++#endif
+ 				else
+ 				{
+ 					Cbuf_AddText("menu main\n");
 diff --git a/engine/src/client/cl_main.c b/engine/src/client/cl_main.c
-index afd8c9c..6fa2b74 100644
+index afd8c9c..7207ef6 100644
 --- a/engine/src/client/cl_main.c
 +++ b/engine/src/client/cl_main.c
-@@ -553,6 +553,19 @@ CL_InitLocal(void)
+@@ -553,6 +553,52 @@ CL_InitLocal(void)
  	Cmd_AddCommand("weaplast", CL_WeapLast_f);
  }
  
@@ -319,19 +421,52 @@ index afd8c9c..6fa2b74 100644
 +/*
 + * browser port: lets the page see what the keyboard and mouse currently drive
 + * (bits 0-1: 0 game, 1 console, 2 message line, 3 menu; bit 2: a level is
-+ * running), so its touch overlay can step aside for the menus
++ * running; bit 3: multiplayer - a remote server or one with more than one
++ * player slot; bit 4: paused; bit 5: a scripted cinematic holds the
++ * controls), so its touch overlay can step aside for the
++ * menus and a rotated phone pauses only a single-player game
 + */
 +int
 +Browser_InputState(void)
 +{
-+	return (int)cls.key_dest | ((cls.state == ca_active) ? 4 : 0);
++	qboolean mp = cls.state >= ca_connected &&
++		(!Com_ServerState() || Cvar_VariableValue("maxclients") > 1);
++
++	return (int)cls.key_dest | ((cls.state == ca_active) ? 4 : 0) |
++		(mp ? 8 : 0) | (cl_paused->value ? 16 : 0) | (CL_CinematicFreezeActive() ? 32 : 0);
++}
++
++/* browser port: the running map's name, for the page's session journal (the console's "Map:" line is only
++   flushed with a later line) */
++const char *
++Browser_MapName(void)
++{
++	return Cvar_VariableString("mapname");
++}
++
++int SV_BrowserFrame(void); /* sv_main.c */
++int SV_GameCinematicState(void);
++
++/* browser port: a one-line snapshot of the client and local server for the page's session journal, to tell a
++   stopped simulation, a pause, a cinematic being fast-forwarded and a stalled level load apart */
++const char *
++Browser_Probe(void)
++{
++	static char buf[200];
++	int server = Com_ServerState();
++
++	Com_sprintf(buf, sizeof(buf), "cls %d key %d cltime %d clframe %d sv %d svframe %d cin %d jump %s paused %s sdis %s",
++		(int)cls.state, (int)cls.key_dest, cl.time, cl.frame.serverframe, server, server ? SV_BrowserFrame() : -1,
++		server ? SV_GameCinematicState() : -1, Cvar_VariableString("sv_jumpcinematic"), Cvar_VariableString("paused"),
++		Cvar_VariableString("s_disable"));
++	return buf;
 +}
 +#endif
 +
  /*
   * Writes key bindings and archived cvars to config.cfg
   */
-@@ -568,6 +581,21 @@ CL_WriteConfiguration(void)
+@@ -568,6 +614,21 @@ CL_WriteConfiguration(void)
  	Com_WriteConfig(false);
  }
  
@@ -409,7 +544,7 @@ index 0c9d1c8..a00c923 100644
  
  static void *
 diff --git a/engine/src/client/cl_screen.c b/engine/src/client/cl_screen.c
-index 0be16eb..cd7d689 100644
+index 0be16eb..61fa901 100644
 --- a/engine/src/client/cl_screen.c
 +++ b/engine/src/client/cl_screen.c
 @@ -82,7 +82,7 @@ extern cvar_t *crosshair_color_r;
@@ -421,7 +556,26 @@ index 0be16eb..cd7d689 100644
  
  static void SCR_TimeRefresh_f(void);
  static void SCR_Loading_f(void);
-@@ -1639,6 +1639,29 @@ SCR_SoF_Frame(void)
+@@ -387,6 +387,18 @@ SCR_CalcVrect(void)
+ 
+ 	scr_vrect.x = (viddef.width - scr_vrect.width) / 2;
+ 	scr_vrect.y = (viddef.height - scr_vrect.height) / 2;
++
++#ifdef __EMSCRIPTEN__
++	/* browser port, opt-in widescreen: scripted cinematics keep the 4:3 framing (and field of view)
++	   they were made for; the sides stay black */
++	if (CL_CinematicFreezeActive() && (scr_vrect.width * 3 > scr_vrect.height * 4))
++	{
++		int w = scr_vrect.height * 4 / 3;
++
++		scr_vrect.x += (scr_vrect.width - w) / 2;
++		scr_vrect.width = w;
++	}
++#endif
+ }
+ 
+ /*
+@@ -1639,6 +1651,29 @@ SCR_SoF_Frame(void)
  
  	R_BeginFrame(0);
  
@@ -451,8 +605,72 @@ index 0be16eb..cd7d689 100644
  	if (live)
  	{
  		SCR_CalcVrect();
+diff --git a/engine/src/client/cl_sofscreen.c b/engine/src/client/cl_sofscreen.c
+index b333d03..0ef9f67 100644
+--- a/engine/src/client/cl_sofscreen.c
++++ b/engine/src/client/cl_sofscreen.c
+@@ -215,7 +215,7 @@ SCR_DrawTypewriter(void)
+ {
+ 	static const unsigned char col[4] = {0, 254, 0, 220};
+ 	int speed, step, n, i, line = 0, col_i = 0, H = HUD_TextH(), cols = (HUD_TextW() - 20) / 8;
+-	float y;
++	float y, x0 = 10.0f;
+ 
+ 	if (!tw.endtime || (cls.realtime >= tw.endtime))
+ 	{
+@@ -253,6 +253,16 @@ SCR_DrawTypewriter(void)
+ 		}
+ 	}
+ 
++#ifdef __EMSCRIPTEN__
++	/* browser port, opt-in widescreen: the caption stays inside the 4:3 picture of the cinematic
++	   (SCR_CalcVrect) instead of at the window's left edge */
++	if (CL_CinematicFreezeActive() && (scr_vrect.x > 0))
++	{
++		x0 += (float)scr_vrect.x / HUD_TextFactor();
++		cols = (int)((float)scr_vrect.width / HUD_TextFactor() - 20) / 8;
++	}
++#endif
++
+ 	/* OpenMerc (text size): drawn with the text factor; a larger text wraps earlier than the 104 columns
+ 	   and keeps the bottom of the block where the original size puts it, so it grows upwards */
+ 	cols = (cols > 104) ? 104 : (cols < 16) ? 16 : cols;
+@@ -303,13 +313,13 @@ SCR_DrawTypewriter(void)
+ 			}
+ 		}
+ 
+-		HUD_DrawCharFloat(10.0f + 8 * col_i, y + 8 * line, (byte)tw.text[i], col);
++		HUD_DrawCharFloat(x0 + 8 * col_i, y + 8 * line, (byte)tw.text[i], col);
+ 		col_i++;
+ 	}
+ 
+ 	if (n < tw.len)
+ 	{
+-		HUD_DrawCharFloat(10.0f + 8 * col_i, y + 8 * line, '_', col);
++		HUD_DrawCharFloat(x0 + 8 * col_i, y + 8 * line, '_', col);
+ 	}
+ 
+ 	HUD_EndText();
+diff --git a/engine/src/client/cl_view.c b/engine/src/client/cl_view.c
+index bfd8d55..547130f 100644
+--- a/engine/src/client/cl_view.c
++++ b/engine/src/client/cl_view.c
+@@ -356,6 +356,13 @@ CL_PrepRefresh(void)
+ 	sscanf(cl.configstrings[CS_SKYAXIS], "%f %f %f", &axis[0], &axis[1], &axis[2]);
+ 	R_SetSky(cl.configstrings[CS_SKY], rotate, axis);
+ 
++	/* SPEC-002 registration step 6, which was missing (browser port fix): the map's terrain set, e.g. the
++	   scrolling landscape outside the moving train of trn1; other maps clear it with an empty name */
++	if (CL_SoF_Active())
++	{
++		HUD_SetTerrain(CL_SoF_ConfigString(HUD_CS_TERRAINSET));
++	}
++
+ 	Com_Printf("                                     \r");
+ 
+ 	if (CL_SoF_Active())
 diff --git a/engine/src/client/header/client.h b/engine/src/client/header/client.h
-index 6e2315d..b213939 100644
+index 6e2315d..28ec713 100644
 --- a/engine/src/client/header/client.h
 +++ b/engine/src/client/header/client.h
 @@ -542,6 +542,11 @@ void M_Menu_Main_f (void);
@@ -467,11 +685,84 @@ index 6e2315d..b213939 100644
  
  void CL_ParseInventory (void);
  void CL_DrawInventory (void);
+@@ -554,6 +559,8 @@ extern cvar_t *cl_protocol;
+ void CL_SoF_Init (void);
+ qboolean CL_SoF_Active (void);
+ const char *CL_SoF_ConfigString (int index);
++void HUD_SetTerrain (const char *name); /* cl_hud.c: renderer slot 0x38 */
++#define HUD_CS_TERRAINSET 14 /* SoF configstring (SPEC-203), = SOF_CS_TERRAINSET */
+ void CL_SoF_FrameAudio (int *ambientset, int *musicmode); /* I1a: sound host */
+ void CL_SoF_NewAttempt (void);
+ void CL_SoF_Reset (void);
+diff --git a/engine/src/client/header/sofclient.h b/engine/src/client/header/sofclient.h
+index 20c07f1..0c8fe72 100644
+--- a/engine/src/client/header/sofclient.h
++++ b/engine/src/client/header/sofclient.h
+@@ -71,6 +71,9 @@ void CL_SoF_SetServerDeathmatch(int dm);
+ /* ---- input (cl_input.c, cl_keyboard.c; SPEC-312) -------------------------- */
+ qboolean CL_CinematicFreezeActive(void);
+ void CL_RequestCinematicSkip(void);
++#ifdef __EMSCRIPTEN__
++qboolean CL_SkipEscapeSwallowed(void);
++#endif
+ /* toggleconsole policy of SPEC-312 5.1: false = do not toggle */
+ qboolean Key_ConsoleToggleAllowed(void);
+ /* zoom factor of SPEC-312 section 8 for the last rendered view */
+diff --git a/engine/src/client/input/header/input.h b/engine/src/client/input/header/input.h
+index 1feb573..3d02056 100644
+--- a/engine/src/client/input/header/input.h
++++ b/engine/src/client/input/header/input.h
+@@ -44,6 +44,9 @@ void IN_Init(void);
+  */
+ void IN_Move(usercmd_t *cmd);
+ 
++/* Adds the sticks' movement to a user command, once per command. */
++void IN_StickMove(usercmd_t *cmd);
++
+ /*
+  * Shuts the backend down
+  */
+diff --git a/engine/src/client/input/sdl2.c b/engine/src/client/input/sdl2.c
+index 5081a3f..68e1831 100644
+--- a/engine/src/client/input/sdl2.c
++++ b/engine/src/client/input/sdl2.c
+@@ -1737,6 +1737,12 @@ IN_GamepadMove(usercmd_t *cmd)
+ /*
+  * Move handling
+  */
++/* the SDL2 backend adds stick movement in IN_Move */
++void
++IN_StickMove(usercmd_t *cmd)
++{
++}
++
+ void
+ IN_Move(usercmd_t *cmd)
+ {
 diff --git a/engine/src/client/input/sdl3.c b/engine/src/client/input/sdl3.c
-index 6f3a69d..152d307 100644
+index 6f3a69d..f9e5ad9 100644
 --- a/engine/src/client/input/sdl3.c
 +++ b/engine/src/client/input/sdl3.c
-@@ -742,6 +742,15 @@ IN_Update(void)
+@@ -289,6 +289,9 @@ static unsigned short int front_sample = 0;
+ 
+ // Threshold at which a trigger press is registered, in SDL units
+ static int trig_thresh;
++// triggers as virtual keys (file scope for the browser port's input diagnostics)
++static qboolean left_trigger = false;
++static qboolean right_trigger = false;
+ 
+ extern void CalibrationFinishedCallback(void);
+ 
+@@ -646,8 +649,6 @@ IN_Update(void)
+ 	SDL_Event event;
+ 	unsigned int key;
+ 
+-	static qboolean left_trigger = false;
+-	static qboolean right_trigger = false;
+ 	static qboolean left_stick[4] = {false, false, false, false};   // left, right, up, down virtual keys
+ 
+ 	static int consoleKeyCode = 0;
+@@ -742,6 +743,15 @@ IN_Update(void)
  				}
  				else if (cls.key_dest == key_menu)
  				{
@@ -487,7 +778,68 @@ index 6f3a69d..152d307 100644
  					/* OpenMerc (I6m): the menu pointer moves by the raw movement (SPEC-801 7.2) */
  					M_MouseMove((int)event.motion.xrel, (int)event.motion.yrel);
  				}
-@@ -1030,6 +1039,16 @@ IN_Update(void)
+@@ -852,23 +862,28 @@ IN_Update(void)
+ 						break;
+ 				}
+ 
++				/* browser port: the sticks' positions are always kept (they are
++				   applied only during play, see IN_Move): a stick released
++				   while a menu or the pause was up no longer stays deflected
++				   when play resumes */
++				switch (event.gaxis.axis)
++				{
++					case SDL_GAMEPAD_AXIS_LEFTX :
++						joystick_left_x = axis_value;
++						break;
++					case SDL_GAMEPAD_AXIS_LEFTY :
++						joystick_left_y = axis_value;
++						break;
++					case SDL_GAMEPAD_AXIS_RIGHTX :
++						joystick_right_x = axis_value;
++						break;
++					case SDL_GAMEPAD_AXIS_RIGHTY :
++						joystick_right_y = axis_value;
++						break;
++				}
++
+ 				if (!cl_paused->value && cls.key_dest == key_game)
+ 				{
+-					switch (event.gaxis.axis)
+-					{
+-						case SDL_GAMEPAD_AXIS_LEFTX :
+-							joystick_left_x = axis_value;
+-							break;
+-						case SDL_GAMEPAD_AXIS_LEFTY :
+-							joystick_left_y = axis_value;
+-							break;
+-						case SDL_GAMEPAD_AXIS_RIGHTX :
+-							joystick_right_x = axis_value;
+-							break;
+-						case SDL_GAMEPAD_AXIS_RIGHTY :
+-							joystick_right_y = axis_value;
+-							break;
+-					}
+ 					break;
+ 				}
+ 
+@@ -964,8 +979,16 @@ IN_Update(void)
+ 			case SDL_EVENT_JOYSTICK_ADDED :
+ 				if (!controller)
+ 				{
++#ifdef __EMSCRIPTEN__
++					/* browser port: the page shows exactly one, already complete
++					   controller (src/input/gamepad.ts), so no settling time is
++					   needed; 100 frames made a controller connected during play
++					   usable only after 1.7 s at 60 frames/s, longer when slower */
++					updates_countdown = 2;
++#else
+ 					// This should be lower, but some controllers just don't want to get detected by the OS
+ 					updates_countdown = 100;
++#endif
+ 					countdown_reason = REASON_CONTROLLERINIT;
+ 				}
+ 				break;
+@@ -1030,6 +1053,16 @@ IN_Update(void)
  			(in_grab->value == 2 && windowed_mouse->value));
  	}
  
@@ -504,6 +856,168 @@ index 6f3a69d..152d307 100644
  	// calling GLimp_GrabInput() each frame is a bit ugly but simple and should work.
  	// The called SDL functions return after a cheap check, if there's nothing to do.
  	GLimp_GrabInput(want_grab);
+@@ -1562,6 +1595,102 @@ IN_GamepadMove(usercmd_t *cmd)
+ 	}
+ }
+ 
++/* the left stick's movement share of the next user command (see IN_Move) */
++static usercmd_t stick_move;
++
++#ifdef __EMSCRIPTEN__
++/* browser port: analog movement from the page's touch stick, -1..1 of the
++   walking speed (forward, right), held until the page changes it */
++static float browser_move_fwd, browser_move_side;
++
++void
++Browser_Move(float forward, float right)
++{
++	browser_move_fwd = Q_clamp(forward, -1.0f, 1.0f);
++	browser_move_side = Q_clamp(right, -1.0f, 1.0f);
++}
++#endif
++
++/* Adds the sticks' movement to the user command being built, once per command
++   and only while the game takes movement. */
++void
++IN_StickMove(usercmd_t *cmd)
++{
++	if (cls.key_dest != key_game || cl_paused->value)
++	{
++		return;
++	}
++
++	cmd->forwardmove = (short)(cmd->forwardmove + stick_move.forwardmove);
++	cmd->sidemove = (short)(cmd->sidemove + stick_move.sidemove);
++#ifdef __EMSCRIPTEN__
++	cmd->forwardmove = (short)(cmd->forwardmove + browser_move_fwd * cl_forwardspeed->value);
++	cmd->sidemove = (short)(cmd->sidemove + browser_move_side * cl_sidespeed->value);
++#endif
++}
++
++#ifdef __EMSCRIPTEN__
++/*
++ * browser port: camera look from the page's touch controls. A swipe is a
++ * rotation in degrees (the page converts finger travel with the player's
++ * sensitivity), accumulated here and applied once by the next IN_Move,
++ * scaled by the zoom factor like the mouse; while the game does not take
++ * movement (menus, console, pause) it is discarded, never stored up.
++ * aim_scale: the player's extra factor while zoomed (scopes).
++ */
++static double browser_look_yaw, browser_look_pitch, browser_look_aim = 1.0;
++
++void
++Browser_Look(float yaw_right, float pitch_down, float aim_scale)
++{
++	if (cls.key_dest != key_game || cl_paused->value || CL_CinematicFreezeActive())
++	{
++		return;
++	}
++	browser_look_yaw += yaw_right;
++	browser_look_pitch += pitch_down;
++	browser_look_aim = aim_scale;
++}
++
++/*
++ * browser port: what the engine's controller handling holds, for the page's
++ * input diagnostics: 0 = a controller is open as a gamepad, 1-4 = left x/y,
++ * right x/y (-32768..32767, SDL's current state), 5 = trigger bits (1 left, 2 right),
++ * 6 = the engine keys held for the 17 buttons of the standard layout (bit n =
++ * standard button n; Start is the menu key, Esc)
++ */
++int
++Browser_PadState(int what)
++{
++	static const int stdkeys[17] = {
++		K_BTN_SOUTH, K_BTN_EAST, K_BTN_WEST, K_BTN_NORTH, K_SHOULDER_LEFT,
++		K_SHOULDER_RIGHT, K_TRIG_LEFT, K_TRIG_RIGHT, K_BTN_BACK, K_ESCAPE,
++		K_STICK_LEFT, K_STICK_RIGHT, K_DPAD_UP, K_DPAD_DOWN, K_DPAD_LEFT,
++		K_DPAD_RIGHT, K_BTN_GUIDE
++	};
++	int i, bits = 0;
++
++	switch (what)
++	{
++		case 6:
++			for (i = 0; i < 17; i++)
++			{
++				bits |= keydown[stdkeys[i]] ? (1 << i) : 0;
++			}
++			return bits;
++		case 0: return controller != NULL;
++		/* the sticks as SDL holds them now (what the next input frame reads);
++		   the engine's own copy is only refreshed during play */
++		case 1: return controller ? SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFTX) : 0;
++		case 2: return controller ? SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFTY) : 0;
++		case 3: return controller ? SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTX) : 0;
++		case 4: return controller ? SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTY) : 0;
++		case 5: return (left_trigger ? 1 : 0) | (right_trigger ? 2 : 0);
++	}
++	return 0;
++}
++#endif
++
+ /* SPEC-312 section 8: z = (F + 85) / 180 * F / 95 for the horizontal field
+    of view F of the view last rendered, in double precision */
+ float
+@@ -1644,9 +1773,40 @@ IN_Move(usercmd_t *cmd)
+ 		}
+ 	}
+ 
+-	if (controller)
++#ifdef __EMSCRIPTEN__
++	if (browser_look_yaw || browser_look_pitch)
+ 	{
+-		IN_GamepadMove(cmd);
++		if (cls.key_dest == key_game && !cl_paused->value)
++		{
++			double z = CL_MouseZoomFactor();
++
++			if (z < 0.999)
++			{
++				z *= browser_look_aim;
++			}
++			cl.viewangles[YAW] -= (float)(browser_look_yaw * z);
++			cl.viewangles[PITCH] += (float)(browser_look_pitch * z);
++		}
++		browser_look_yaw = browser_look_pitch = 0;
++	}
++#endif
++
++	/* browser port: the left stick's movement is the latest reading, added
++	   once to each user command (IN_StickMove); summed over every input frame
++	   it grew with the frame rate */
++	memset(&stick_move, 0, sizeof(stick_move));
++
++	if (controller && !cl_paused->value)
++	{
++		/* the sticks' current positions, read every input frame: SDL's axis
++		   events take the first deflection it sees as the stick's rest
++		   position and send only later changes, so with events alone a push
++		   could be lost (browser test: stick held, no event, player still) */
++		joystick_left_x = SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFTX);
++		joystick_left_y = SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFTY);
++		joystick_right_x = SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTX);
++		joystick_right_y = SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTY);
++		IN_GamepadMove(&stick_move);
+ 	}
+ 
+ 	if (gyro_enabled)
+@@ -2685,6 +2845,15 @@ IN_Init(void)
+ 	joy_active_layout = LAYOUT_NONE;
+ 	gyro_active = gyro_enabled = false;
+ 
++#ifdef __EMSCRIPTEN__
++	/* browser port: SDL ignores stick movement away from the centre and
++	   button presses while its window lacks keyboard focus, which a canvas on
++	   a touch-only phone may never get. Browsers hand controller data only to
++	   the visible page anyway, so the filter could only lose input. Set
++	   before the gamepad subsystem starts. */
++	SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++#endif
++
+ 	exponential_speedup = Cvar_Get("exponential_speedup", "0", CVAR_ARCHIVE);
+ 	freelook = Cvar_Get("freelook", "0", CVAR_ARCHIVE);
+ 	in_grab = Cvar_Get("in_grab", "2", CVAR_ARCHIVE);
 diff --git a/engine/src/client/menu/menu.c b/engine/src/client/menu/menu.c
 index 0a29fc9..7c93daf 100644
 --- a/engine/src/client/menu/menu.c
@@ -865,10 +1379,20 @@ index 25360e3..b0216b4 100644
  
  	return glimp_refreshRate;
 diff --git a/engine/src/client/vid/vid.c b/engine/src/client/vid/vid.c
-index 9ce2ab3..e997d8f 100644
+index 9ce2ab3..b527c71 100644
 --- a/engine/src/client/vid/vid.c
 +++ b/engine/src/client/vid/vid.c
-@@ -321,6 +321,23 @@ VID_Apply_f(void)
+@@ -24,6 +24,9 @@
+  * =======================================================================
+  */
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include <assert.h>
+ #include <errno.h>
+ 
+@@ -321,6 +324,33 @@ VID_Apply_f(void)
  static qboolean
  VID_GetModeInfo(int *width, int *height, int mode)
  {
@@ -883,8 +1407,18 @@ index 9ce2ab3..e997d8f 100644
 +
 +	if ((mode >= 0) && (mode < (int)(sizeof(sof_modes) / sizeof(sof_modes[0]))))
 +	{
++		/* opt-in widescreen (Module.wideAspect, set by the page; 0 = the original 4:3): the
++		   resolution row then selects the height and the width follows the aspect */
++		double aspect = EM_ASM_DOUBLE({ return Module['wideAspect'] || 0; });
++
 +		*width = sof_modes[mode][0];
 +		*height = sof_modes[mode][1];
++
++		if (aspect > 4.0 / 3.0)
++		{
++			*width = ((int)(*height * aspect + 1.0)) & ~1;
++		}
++
 +		return true;
 +	}
 +#endif
@@ -893,23 +1427,51 @@ index 9ce2ab3..e997d8f 100644
  	{
  		return false;
 diff --git a/engine/src/common/frame.c b/engine/src/common/frame.c
-index a60a3b5..a2b389a 100644
+index a60a3b5..c0289d6 100644
 --- a/engine/src/common/frame.c
 +++ b/engine/src/common/frame.c
-@@ -179,6 +179,28 @@ Qcommon_Buildstring(void)
+@@ -179,6 +179,56 @@ Qcommon_Buildstring(void)
  	printf("Architecture: %s\n", YQ2ARCH);
  }
  
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
-+/* The browser owns the loop: one engine frame per animation frame. Qcommon_Frame keeps
-+   its own usec-based timing and frame pacing, so the simulation is not tied to 60 Hz. */
++/* The browser owns the loop: Qcommon_Frame runs from the animation-frame callback and keeps its
++   own usec-based timing, so the simulation (10 Hz server frames, msec-based movement) does not depend
++   on the display rate.
++   - Module.frameCap (set by the page, 0 = every display frame): a frame-rate target. Frames follow a
++     schedule advanced by 1/cap per frame (not reset to "now"), so the average rate is the cap even when
++     the display interval does not divide it (144 Hz with a cap of 60 runs 3, 2, 3, 2 ... display frames).
++   A hidden tab gets no animation frames; the engine's own timing already keeps the world from
++   fast-forwarding afterwards (measured: work/tools/pw/resume-check.mjs). */
++
 +static long long em_oldtime;
++static double em_next;
 +
 +static void
 +Qcommon_EmFrame(void)
 +{
-+	long long newtime = Sys_Microseconds();
++	double cap = EM_ASM_DOUBLE({ return Module['frameCap'] || 0; });
++	long long newtime;
++
++	if (cap > 0)
++	{
++		double now = emscripten_get_now();
++
++		if ((em_next == 0) || (now - em_next > 250))
++		{
++			em_next = now; /* first frame, or after a stall: restart the schedule */
++		}
++
++		if (now < em_next - 2.0) /* 2 ms tolerance for animation-frame jitter */
++		{
++			return;
++		}
++
++		em_next += 1000.0 / cap;
++	}
++
++	newtime = Sys_Microseconds();
 +	curtime = (int)(newtime / 1000ll);
 +	Qcommon_Frame(newtime - em_oldtime);
 +	em_oldtime = newtime;
@@ -925,7 +1487,7 @@ index a60a3b5..a2b389a 100644
  static void
  Qcommon_Mainloop(void)
  {
-@@ -229,6 +251,7 @@ Qcommon_Mainloop(void)
+@@ -229,6 +279,7 @@ Qcommon_Mainloop(void)
  		oldtime = newtime;
  	}
  }
@@ -954,10 +1516,18 @@ index e562bc8..301cb5e 100644
  	SOCKET s = socket(AF_INET, type, protocol);
  
 diff --git a/engine/src/common/header/sof/game_api.h b/engine/src/common/header/sof/game_api.h
-index fc54636..eaaee32 100644
+index fc54636..c4c94a5 100644
 --- a/engine/src/common/header/sof/game_api.h
 +++ b/engine/src/common/header/sof/game_api.h
-@@ -574,7 +574,8 @@ typedef sof_player_export_t *(*sof_getplayerapi_t)(void *common, void *side);
+@@ -67,6 +67,7 @@ struct cvar_s;
+ #define SOF_CS_MAPCHECKSUM 6
+ #define SOF_CS_AMBSET 12
+ #define SOF_CS_MUSICSET 13
++#define SOF_CS_TERRAINSET 14 /* worldspawn "terrainset" (trn1: "train") */
+ #define SOF_CS_MAXCLIENTS 31
+ #define SOF_CS_MODELS 35
+ #define SOF_CS_SOUNDS 291
+@@ -574,7 +575,8 @@ typedef sof_player_export_t *(*sof_getplayerapi_t)(void *common, void *side);
     76 bytes; the client fills every entry (the game fills its own copy for the server side). */
  typedef struct sof_player_common_import_s
  {
@@ -1013,6 +1583,98 @@ index f6a3cc7..d26f6e4 100644
  }
  
  /* FS_LoadFile(name, buffer, unused): the third argument is ignored */
+diff --git a/engine/src/server/sv_main.c b/engine/src/server/sv_main.c
+index c625a10..5ac6314 100644
+--- a/engine/src/server/sv_main.c
++++ b/engine/src/server/sv_main.c
+@@ -753,3 +753,12 @@ SV_Shutdown(char *finalmsg, qboolean reconnect)
+ 	memset(&svs, 0, sizeof(svs));
+ 	net_maxmsglen = MAX_MSGLEN; /* SPEC-200: back to the network size */
+ }
++
++#ifdef __EMSCRIPTEN__
++/* browser port: the server's frame counter, for the page's session journal (cl_main.c Browser_Probe) */
++int
++SV_BrowserFrame(void)
++{
++	return sv.framenum;
++}
++#endif
+diff --git a/game/src/ai/ai_api.h b/game/src/ai/ai_api.h
+index d58c5b2..e63b839 100644
+--- a/game/src/ai/ai_api.h
++++ b/game/src/ai/ai_api.h
+@@ -298,6 +298,11 @@ public:
+ 	float scale = 1.0f;                  /* 440 */
+ 	int sense_mask = 7;                  /* 444 */
+ 	float jump_reach = 100.0f;           /* 448 */
++	/* browser port, not part of the saved record: the train that last carried this character on its top
++	   (props::Riders). While its box still rests on that train's top (moving or stopped), the character stands on
++	   it although physics gives it no ground entity (a bounding-box prop is not taken as ground, SPEC-760 B4.10) */
++	edict_t *carrier = nullptr;
++	bool Carried(edict_t *ent);
+ 	float jump_height = 50.0f;           /* 452 */
+ 	float vehicle_456 = 1000000.0f;      /* 456 (vehicle AI) */
+ 	float step_height = 24.0f;           /* 460 */
+diff --git a/game/src/ai/ai_decisions.cpp b/game/src/ai/ai_decisions.cpp
+index b802031..0616f95 100644
+--- a/game/src/ai/ai_decisions.cpp
++++ b/game/src/ai/ai_decisions.cpp
+@@ -1015,7 +1015,10 @@ void CombatDecision::Plan(edict_t *ent, AI *ai)
+ 
+ void CombatDecision::CombatPlan(edict_t *ent, AI *ai)
+ {
+-	if (!ent->groundentity && ent->movetype != MOVETYPE_FLY) {
++	/* not standing on anything: only the stand plan. A character carried on top of a moving train stands on it
++	 * although physics gives it no ground entity (a bounding-box prop is not taken as ground, SPEC-760 B4.10):
++	 * the tsr1 roof skinheads saw the player but idled through the whole fight (work/captures/p10) */
++	if (!ent->groundentity && !ai->Carried(ent) && ent->movetype != MOVETYPE_FLY) {
+ 		PlanStandAny(ent, ai, nullptr);
+ 		return;
+ 	}
+@@ -1275,7 +1278,7 @@ public:
+ 
+ 	void Plan(edict_t *ent, AI *ai) override
+ 	{
+-		if (!ent->groundentity && ent->movetype != MOVETYPE_FLY) {
++		if (!ent->groundentity && !ai->Carried(ent) && ent->movetype != MOVETYPE_FLY) {
+ 			PlanStand(ent, ai, nullptr, nullptr, false, nullptr);
+ 			return;
+ 		}
+diff --git a/game/src/ai/ai_object.cpp b/game/src/ai/ai_object.cpp
+index 9e1c48e..0329aed 100644
+--- a/game/src/ai/ai_object.cpp
++++ b/game/src/ai/ai_object.cpp
+@@ -371,6 +371,29 @@ void OmAI::AddDeferredSenses(edict_t *ent)
+ 	}
+ }
+ 
++/* resting on top of the train that carried it (the test of props::Riders; link boxes are 1 unit larger) */
++bool OmAI::Carried(edict_t *ent)
++{
++	if (carrier && !carrier->inuse)
++		carrier = nullptr;
++	if (!carrier) {
++		/* not kept in saved games: after a load, the train under the character's feet (its box rests 1 unit into
++		   the train's top, so the trace starts inside the train and reports it) */
++		vec3_t end;
++		VectorCopy(ent->s.origin, end);
++		end[2] -= 2;
++		trace_t tr = gi.trace(ent->s.origin, ent->mins, ent->maxs, end, ent, MASK_MONSTERSOLID);
++		if (!tr.ent || !tr.ent->classname || Q_stricmp(tr.ent->classname, "misc_generic_train"))
++			return false;
++		carrier = tr.ent;
++	}
++	const edict_t *c = carrier;
++	if (fabsf(ent->absmin[2] - c->absmax[2]) > 3)
++		return false;
++	return ent->absmin[0] < c->absmax[0] && ent->absmax[0] > c->absmin[0] && ent->absmin[1] < c->absmax[1] &&
++	       ent->absmax[1] > c->absmin[1];
++}
++
+ void OmAI::Wake(edict_t *ent)
+ {
+ 	if (CvarValue(cv.ai_trace) && !awake)
 diff --git a/game/src/damage/damage_api.h b/game/src/damage/damage_api.h
 index 2a98747..ee30fd5 100644
 --- a/game/src/damage/damage_api.h
@@ -1026,6 +1688,31 @@ index 2a98747..ee30fd5 100644
  // Convenience: Dmg_ShotBegin + engine trace with the filter.
  trace_t Dmg_ShotTrace(const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, edict_t *pass,
                        int mask);
+diff --git a/game/src/damage/g3_damage.cpp b/game/src/damage/g3_damage.cpp
+index c9b2dda..ad52b87 100644
+--- a/game/src/damage/g3_damage.cpp
++++ b/game/src/damage/g3_damage.cpp
+@@ -349,7 +349,20 @@ static void DamageHit(G3Hit &h);
+ 
+ void Dmg_DamageHit(G3Hit &h)
+ {
++	/* OpenMerc debug (browser port): with ai_trace, every hit on a player is reported with its attacker, so that
++	 * damage can be attributed to a character in tests (work/tools/pw/tsr1-combat.mjs) */
++	static cvar_t *trace = gi.cvar("ai_trace", "0", 0);
++	int before = h.targ && h.targ->client ? h.targ->health : 0;
++	if (!(trace->value && h.targ && h.targ->client)) {
++		DamageHit(h);
++		Dmg_ShotClear();
++		return;
++	}
+ 	DamageHit(h);
++	if (h.targ->inuse)
++		gi.cprintf(NULL, PRINT_HIGH, "%6.1f dmg to %d from %d (%s) mod %d damage %d health %d -> %d\n", level.time,
++		           (int)(h.targ - g_edicts), h.attacker ? (int)(h.attacker - g_edicts) : -1,
++		           h.attacker && h.attacker->classname ? h.attacker->classname : "-", h.mod, h.damage, before, h.targ->health);
+ 	Dmg_ShotClear(); // the hit list belongs to this one hit
+ }
+ 
 diff --git a/game/src/damage/g3_shot.cpp b/game/src/damage/g3_shot.cpp
 index 8022d59..6f27174 100644
 --- a/game/src/damage/g3_shot.cpp
@@ -1039,6 +1726,95 @@ index 8022d59..6f27174 100644
  {
  	edict_t *ent = tr->ent;
  	if (!ent || ent == world)
+diff --git a/game/src/g_cmds.cpp b/game/src/g_cmds.cpp
+index b1ba3cb..58750ee 100644
+--- a/game/src/g_cmds.cpp
++++ b/game/src/g_cmds.cpp
+@@ -154,6 +154,53 @@ static void Cmd_KillAllMonsters_f(edict_t *ent)
+ 	gi.cprintf(ent, PRINT_HIGH, "killed %d monsters\n", n);
+ }
+ 
++// browser port (test support, cheats only): uses the entities with a targetname as the player would trigger them
++// (e.g. a level's end relay, to test what follows without scripting the whole fight)
++static void Cmd_OmUse_f(edict_t *ent)
++{
++	if (!CheatsOK(ent))
++		return;
++	if (gi.argc() < 2) {
++		gi.cprintf(ent, PRINT_HIGH, "usage: omuse <targetname>\n");
++		return;
++	}
++	const char *name = gi.argv(1);
++	int n = 0;
++	for (int i = 0; i < globals.num_edicts; i++) {
++		edict_t *e = &g_edicts[i];
++		if (!e->inuse || !e->use || !e->targetname || Q_stricmp(e->targetname, name))
++			continue;
++		e->use(e, ent, ent);
++		n++;
++	}
++	gi.cprintf(ent, PRINT_HIGH, "used %d entities named %s\n", n, name);
++}
++
++// browser port (test support, cheats only): position, motion and ground of the entities with a targetname
++// ("!self": the calling player)
++static void Cmd_OmEntInfo_f(edict_t *ent)
++{
++	if (!CheatsOK(ent))
++		return;
++	if (gi.argc() < 2) {
++		gi.cprintf(ent, PRINT_HIGH, "usage: omentinfo <targetname>\n");
++		return;
++	}
++	const char *name = gi.argv(1);
++	bool self = !Q_stricmp(name, "!self");
++	for (int i = 0; i < globals.num_edicts; i++) {
++		edict_t *e = &g_edicts[i];
++		if (!e->inuse || (self ? e != ent : (!e->targetname || Q_stricmp(e->targetname, name))))
++			continue;
++		gi.cprintf(ent, PRINT_HIGH,
++			"OMENT %s #%d %s org %.1f %.1f %.1f vel %.1f %.1f %.1f ground %s mt %d solid %d hp %d\n",
++			self ? "!self" : e->targetname, i, e->classname ? e->classname : "-", e->s.origin[0], e->s.origin[1], e->s.origin[2],
++			e->velocity[0], e->velocity[1], e->velocity[2],
++			e->groundentity ? (e->groundentity->classname ? e->groundentity->classname : "?") : "none",
++			(int)e->movetype, (int)e->solid, e->health);
++	}
++}
++
+ static void Cmd_EntList_f(edict_t *ent)
+ {
+ 	if (!CheatsOK(ent))
+@@ -485,6 +532,10 @@ void ClientCommand(edict_t *ent)
+ 		Cmd_Noclip_f(ent);
+ 	else if (Q_stricmp(cmd, "omsetpos") == 0)
+ 		Cmd_OmSetPos_f(ent);
++	else if (Q_stricmp(cmd, "omentinfo") == 0)
++		Cmd_OmEntInfo_f(ent);
++	else if (Q_stricmp(cmd, "omuse") == 0)
++		Cmd_OmUse_f(ent);
+ 	else if (Q_stricmp(cmd, "gimme") == 0)
+ 		Cmd_Gimme_f(ent);
+ 	else if (Q_stricmp(cmd, "defaultweapons") == 0) {
+diff --git a/game/src/g_func.cpp b/game/src/g_func.cpp
+index 92ecf8a..2dea5b1 100644
+--- a/game/src/g_func.cpp
++++ b/game/src/g_func.cpp
+@@ -879,11 +879,13 @@ void door_use(edict_t *self, edict_t *other, edict_t *activator)
+ 	door_activate(master, other, activator);
+ }
+ 
+-// direct use: use key or trigger field
++// direct use: use key or trigger field. Whether a door answers the use key is the used member's own property (no
++// targetname, or 0x2000), as its use-key handler is installed per member: a team whose master is named for scripts
++// can still have usable members (trn1's last wagon: the side door *31 is unnamed, the hidden master *12 is "door").
+ static void door_direct_use(edict_t *self, edict_t *other, edict_t *activator)
+ {
+ 	edict_t *master = (self->flags & FL_TEAMSLAVE) && self->teammaster ? self->teammaster : self;
+-	if (master->targetname && !(master->spawnflags & DOOR_PLAYER_USABLE))
++	if (self->targetname && !(self->spawnflags & DOOR_PLAYER_USABLE))
+ 		return;
+ 	if (master->spawnflags & DOOR_LOCKED)
+ 		return;
 diff --git a/game/src/g_weapon.cpp b/game/src/g_weapon.cpp
 index 90c9390..cd135f2 100644
 --- a/game/src/g_weapon.cpp
@@ -1083,6 +1859,183 @@ index c2179c0..4d96542 100644
  
  protected:
  	~WeaponDesc() {}
+diff --git a/game/src/props/prop_core.cpp b/game/src/props/prop_core.cpp
+index ee72f77..e0fb109 100644
+--- a/game/src/props/prop_core.cpp
++++ b/game/src/props/prop_core.cpp
+@@ -3,6 +3,7 @@
+ // Implements: SPEC-770 §3, §4, §5 (5.1-5.9), SPEC-791 §12
+ 
+ #include "props.h"
++#include "../ai/ai_api.h"
+ #include "../effects/fx.h"
+ #include "../damage/damage_api.h"
+ 
+@@ -874,18 +875,38 @@ void FallOverStart(edict_t *self, edict_t *player)
+ // ---------------------------------------------------------------------------------------------------------------
+ // §5.9 riders
+ 
++// A character standing on the prop's top: its box rests on the top face (link boxes are 1 unit larger on each side)
++// and overlaps the prop horizontally. Character physics takes only BSP or solid-4 entities as ground (SPEC-760
++// B4.10), so a character on a bounding-box prop has no ground entity.
++static bool OnTop(const edict_t *p, const edict_t *self)
++{
++	if (p->velocity[2] > 0 || fabsf(p->absmin[2] - self->absmax[2]) > 3)
++		return false;
++	return p->absmin[0] < self->absmax[0] && p->absmax[0] > self->absmin[0] && p->absmin[1] < self->absmax[1] &&
++	       p->absmax[1] > self->absmin[1];
++}
++
++// SPEC-770 �5.9 carries players only. Characters ride as well (browser port fix): tsr1's subway train
++// (`skintrain`, script tsr1/etrainset) starts with three skinheads on its roof that the end cinematic (tsr1/endcin)
++// still finds at the train's stop point, so the original carries them; with players only they were left behind
++// and dropped onto the track bed (work/captures/train). A character uses its own clip mask.
+ void Riders(edict_t *self)
+ {
+-	for (int i = 1; i <= game.maxclients; i++) {
++	for (int i = 1; i < globals.num_edicts; i++) {
+ 		edict_t *p = g_edicts + i;
+-		if (!p->inuse || !p->client || p->groundentity != self)
++		if (!p->inuse || p == self)
++			continue;
++		bool character = !p->client && p->ai && p->health > 0;
++		if (p->client ? p->groundentity != self : !(character && (p->groundentity == self || OnTop(p, self))))
+ 			continue;
+ 		if (p->movetype == MOVETYPE_NONE || p->movetype == MOVETYPE_NOCLIP || p->movetype == MOVETYPE_PUSH ||
+ 		    p->movetype == MOVETYPE_STOP)
+ 			continue;
++		if (character)
++			p->ai->carrier = self;
+ 		vec3_t np;
+ 		VectorMA(p->s.origin, FRAMETIME, self->velocity, np);
+-		trace_t tr = gi.trace(np, p->mins, p->maxs, np, p, 0x02010003);
++		trace_t tr = gi.trace(np, p->mins, p->maxs, np, p, character ? p->clipmask : 0x02010003);
+ 		if (tr.startsolid || tr.allsolid)
+ 			continue;
+ 		VectorCopy(np, p->s.origin);
+diff --git a/game/src/save/save_image.cpp b/game/src/save/save_image.cpp
+index 96316e6..8b7fa5e 100644
+--- a/game/src/save/save_image.cpp
++++ b/game/src/save/save_image.cpp
+@@ -17,7 +17,7 @@
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+-#else
++#elif !defined(__EMSCRIPTEN__)
+ #include <dlfcn.h>
+ #endif
+ 
+@@ -35,6 +35,11 @@ static int g_image_done;
+ 
+ static void ImageAnchor(void) {}
+ 
++#ifdef __EMSCRIPTEN__
++// browser port: the function anchor (an index into the shared function table) for G10_EncodePtr
++const void *ImageFunctionAnchor(void) { return (const void *)&ImageAnchor; }
++#endif
++
+ static uint32_t Crc32(const unsigned char *p, size_t n)
+ {
+ 	uint32_t c = 0xFFFFFFFFu;
+@@ -102,6 +107,26 @@ const ImageInfo &Image(void)
+ 		g_image.size = nt->OptionalHeader.SizeOfImage;
+ 		CodeFingerprint(h, &g_image.timestamp, &g_image.checksum);
+ 	}
++#elif defined(__EMSCRIPTEN__)
++	// browser port: a WebAssembly side module has no image base. Its functions are indices into the shared function
++	// table and its data lies in linear memory, each block relocated as a whole when the engine loads the module, so
++	// pointers are saved relative to one function anchor and one data anchor (G10_EncodePtr). dladdr gives nothing
++	// here, which left every callback of a save unencoded (lost on load: triggers, doors and relays stopped working).
++	// The fingerprint is a CRC-32 of the module file as the page placed it in the engine's filesystem.
++	g_image.base = (const unsigned char *)&g_image; // data anchor
++	g_image.size = 0x7fffffff;
++	if (FILE *f = fopen("base/gamex86.so", "rb")) {
++		fseek(f, 0, SEEK_END);
++		long len = ftell(f);
++		fseek(f, 0, SEEK_SET);
++		unsigned char *buf = (unsigned char *)malloc(len > 0 ? len : 1);
++		if (buf && fread(buf, 1, len, f) == (size_t)len) {
++			g_image.timestamp = Crc32(buf, (size_t)len);
++			g_image.checksum = (uint32_t)len;
++		}
++		free(buf);
++		fclose(f);
++	}
+ #else
+ 	Dl_info info;
+ 	if (dladdr((void *)&ImageAnchor, &info) && info.dli_fbase) {
+diff --git a/game/src/save/save_io.cpp b/game/src/save/save_io.cpp
+index b151d12..901c48e 100644
+--- a/game/src/save/save_io.cpp
++++ b/game/src/save/save_io.cpp
+@@ -197,11 +197,30 @@ edict_t *G10_DecodeEnt(int n)
+ 	return &g_edicts[n];
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// browser port (save_image.cpp): a pointer is either a function-table index or a linear-memory address; it is saved
++// relative to the nearer of the two anchors. Codes: data D_ZERO + offset in [0, 2 * D_SPAN); functions F_TAG + F_ZERO +
++// offset in [F_TAG, F_TAG + 2 * F_ZERO).
++namespace g10 { const void *ImageFunctionAnchor(void); }
++static const int64_t D_SPAN = 0x10000000, D_ZERO = 0x10000000, F_TAG = 0x60000000, F_ZERO = 0x01000000;
++#endif
++
+ int G10_EncodePtr(const void *p)
+ {
+ 	if (!p)
+ 		return -1;
+ 	const ImageInfo &im = Image();
++#ifdef __EMSCRIPTEN__
++	if (!im.base)
++		return -1;
++	{
++		int64_t v = (int64_t)(uintptr_t)p, fa = (int64_t)(uintptr_t)ImageFunctionAnchor(), da = (int64_t)(uintptr_t)im.base;
++		int64_t df = v - fa, dd = v - da;
++		if ((df < 0 ? -df : df) < (dd < 0 ? -dd : dd))
++			return (df > -F_ZERO && df < F_ZERO) ? (int)(F_TAG + F_ZERO + df) : -1;
++		return (dd > -D_SPAN && dd < D_SPAN) ? (int)(D_ZERO + dd) : -1;
++	}
++#endif
+ 	const unsigned char *q = (const unsigned char *)p;
+ 	if (!im.base || q < im.base || (uint32_t)(q - im.base) >= im.size)
+ 		return -1;
+@@ -213,6 +232,13 @@ void *G10_DecodePtr(int code)
+ 	if (code < 0)
+ 		return NULL;
+ 	const ImageInfo &im = Image();
++#ifdef __EMSCRIPTEN__
++	if (!im.base)
++		return NULL;
++	if (code >= F_TAG)
++		return code < F_TAG + 2 * F_ZERO ? (void *)(uintptr_t)((int64_t)(uintptr_t)ImageFunctionAnchor() + (code - F_TAG - F_ZERO)) : NULL;
++	return code < D_ZERO + D_SPAN ? (void *)(uintptr_t)((int64_t)(uintptr_t)im.base + (code - D_ZERO)) : NULL;
++#endif
+ 	if (!im.base || (uint32_t)code >= im.size)
+ 		return NULL;
+ 	return (void *)(im.base + code);
+diff --git a/game/src/save/save_level.cpp b/game/src/save/save_level.cpp
+index 3d3f1a0..360d69d 100644
+--- a/game/src/save/save_level.cpp
++++ b/game/src/save/save_level.cpp
+@@ -274,6 +274,17 @@ void ReadLevelSection(void)
+ 	int32_t ft[9], mine[9];
+ 	G10_ReadChunk("FTSZ", ft, 36);
+ 	Fingerprint(mine);
++#ifdef __EMSCRIPTEN__
++	// browser port: saves of the browser builds before the callback fix (save_image.cpp) carry an empty fingerprint
++	// (no image found) and no pointer codes at all - every callback was written as none - so they can be read as
++	// before; their entities keep no callbacks, which breaks triggers, doors and relays of that level
++	if (memcmp(ft, mine, sizeof(ft)) && ft[0] == mine[0] && !ft[1] && !ft[2] && !ft[3] &&
++	    !memcmp(ft + 4, mine + 4, sizeof(ft) - 4 * sizeof(int32_t))) {
++		gi.dprintf("This save was made before the browser port saved callbacks: the level's triggers, doors and relays "
++		           "will not work. Start the level again or load a newer save.\n");
++		memcpy(ft, mine, sizeof(ft));
++	}
++#endif
+ 	if (memcmp(ft, mine, sizeof(ft)))
+ 		gi.error("Function index tables have changed size"); // SPEC-752 1.2 (a save of another module or build)
+ 	KeepBefore();
 diff --git a/game/src/sof_game.h b/game/src/sof_game.h
 index 9d4f066..5b85f5c 100644
 --- a/game/src/sof_game.h

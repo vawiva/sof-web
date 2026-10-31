@@ -51,7 +51,7 @@ Docker Compose (needs Docker; the page must be built first: `npm run engine && n
 
 ```sh
 cd server
-SOF_DATA="C:/GOG Games/Soldier of Fortune/base" SOF_PUBLIC_IP=10.0.1.3 SOF_BIND=10.0.1.3 docker compose up --build
+SOF_DATA="C:/GOG Games/Soldier of Fortune/base" SOF_PUBLIC_IP=192.168.1.20 SOF_BIND=192.168.1.20 docker compose up --build
 ```
 
 `SOF_DATA` is mounted read-only into both containers; no game file goes into an image. `SOF_PUBLIC_IP` is the PC's LAN

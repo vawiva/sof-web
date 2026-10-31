@@ -101,7 +101,7 @@ export class GatewayTransport {
   }
 }
 
-/** The gateway next to the page (same origin), e.g. wss://10.0.1.3:8443/mp. */
+/** The gateway next to the page (same origin), e.g. wss://192.168.1.20:8443/mp. */
 export function defaultGatewayUrl(): string {
   const u = new URL('mp', document.baseURI);
   u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';

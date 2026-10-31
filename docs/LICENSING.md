@@ -53,6 +53,12 @@ replacement, a separate permission, or an independent re-implementation of those
 Soldier of Fortune's data is not part of this project and must never be committed, bundled or served. The page reads
 the player's own files locally; `check:dist` fails on any PACK archive or game-data file in the build.
 
+**Icons.** `public/icons/` holds the project's own sight icon, drawn by `scripts/make-icons.py`. The game's icon (the
+red sight with "SOF" in `SoF.exe`, Raven Software / Activision) is not included: the LAN host makes the installed
+app's icon from the player's own `SoF.exe` at run time for paired devices (`server/exe-icon.mjs`), without storing it.
+A copy of that icon kept in the private working folder is identical to the executable's and stays out of this
+repository.
+
 ## Notices
 
 `public/THIRD_PARTY_NOTICES.md` (served with the page) lists the third-party components of the build; the engine
